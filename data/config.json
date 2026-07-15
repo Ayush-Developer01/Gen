@@ -11,6 +11,6 @@
   "premiumRoleId": null,
   "lowStockThreshold": 5,
   "minAccountAgeDays": 0,
-  "vouchTimeoutMinutes": 30,
+  "vouchTimeoutMinutes": 3,
   "genRoleId": "1523735238142988419"
 }
