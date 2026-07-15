@@ -345,7 +345,7 @@ export function startBot(): void {
               .setDescription(
                 `Your message was deleted because it didn't mention the stock name.\n\n` +
                 `Please write your vouch and include: **${entry.stockName}**\n\n` +
-                `Example: \`legit got ${entry.stockName} from ping your bot\``
+                `Example: \`legit got ${entry.stockName} from ping me\``
               )
               .setTimestamp()
             ],
