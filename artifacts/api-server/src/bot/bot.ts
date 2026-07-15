@@ -56,8 +56,8 @@ interface GenStats        { total: number; byStock: { [name: string]: number } }
 
 type Tier = "boost" | "premium" | "free";
 const TIER: Record<Tier, { cooldownMs: number; dailyLimit: number; label: string; emoji: string }> = {
-  boost:   { cooldownMs: 10 * 60_000, dailyLimit: 45, label: "Boost",   emoji: "🚀" },
-  premium: { cooldownMs: 10 * 60_000, dailyLimit: 30, label: "Premium", emoji: "⭐" },
+  boost:   { cooldownMs: 5  * 60_000, dailyLimit: 45, label: "Boost",   emoji: "🚀" },
+  premium: { cooldownMs: 7  * 60_000, dailyLimit: 30, label: "Premium", emoji: "⭐" },
   free:    { cooldownMs: 10 * 60_000, dailyLimit: 20, label: "Free",    emoji: "👤" },
 };
 const MISS_DURATIONS = [0, 30, 40, 50, 60]; // minutes; index = miss count
@@ -365,8 +365,8 @@ export function startBot(): void {
             {
               name: "📊 Gen Limits & Cooldowns",
               value: [
-                `🚀 **Boost**   — 45 gens/day · 10 min cooldown`,
-                `⭐ **Premium** — 30 gens/day · 10 min cooldown`,
+                `🚀 **Boost**   — 45 gens/day · 5 min cooldown`,
+                `⭐ **Premium** — 30 gens/day · 7 min cooldown`,
                 `👤 **Free**    — 20 gens/day · 10 min cooldown`,
               ].join("\n"),
             },
