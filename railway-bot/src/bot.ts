@@ -29,6 +29,7 @@ interface Config {
   vouchChannelId: string | null;
   logChannelId: string | null;
   announceChannelId: string | null;
+  genChannelId: string | null;
   autorole: { statusText: string; roleId: string } | null;
   boostRoleId: string | null;
   premiumRoleId: string | null;
@@ -79,18 +80,18 @@ function writeJson(file: string, data: unknown) {
   fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
-const getConfig  = (): Config  => readJson<Config>("config.json", {
+const getConfig = (): Config => readJson<Config>("config.json", {
   prefix: "&", vouchChannelId: null, logChannelId: null, announceChannelId: null,
-  autorole: null, boostRoleId: null, premiumRoleId: null, genRoleId: null,
-  lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
+  genChannelId: null, autorole: null, boostRoleId: null, premiumRoleId: null,
+  genRoleId: null, lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
 });
-const getStocks         = () => readJson<Stocks>        ("stocks.json",   {});
-const getBlacklist      = () => readJson<Blacklist>     ("blacklist.json",{ users: [] });
-const getCooldowns      = () => readJson<Cooldowns>     ("cooldowns.json",{});
-const getDailyUsage     = () => readJson<DailyUsage>    ("daily.json",    {});
-const getPending        = () => readJson<PendingVouches>("vouches.json",  {});
-const getMisses         = () => readJson<MissCount>     ("misses.json",   {});
-const getGenStats       = () => readJson<GenStats>      ("genstats.json", { total: 0, byStock: {} });
+const getStocks     = () => readJson<Stocks>        ("stocks.json",   {});
+const getBlacklist  = () => readJson<Blacklist>     ("blacklist.json",{ users: [] });
+const getCooldowns  = () => readJson<Cooldowns>     ("cooldowns.json",{});
+const getDailyUsage = () => readJson<DailyUsage>    ("daily.json",    {});
+const getPending    = () => readJson<PendingVouches>("vouches.json",  {});
+const getMisses     = () => readJson<MissCount>     ("misses.json",   {});
+const getGenStats   = () => readJson<GenStats>      ("genstats.json", { total: 0, byStock: {} });
 
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 
@@ -110,7 +111,6 @@ function checkBlacklist(userId: string): { listed: boolean; entry?: BlacklistEnt
   if (!entry) return { listed: false };
   if (entry.type === "perm") return { listed: true, entry };
   if (entry.type === "temp" && entry.until && Date.now() < entry.until) return { listed: true, entry };
-  // Expired — purge
   bl.users = bl.users.filter(u => !(u.id === userId && u.type === "temp" && u.until && Date.now() >= u.until));
   writeJson("blacklist.json", bl);
   return { listed: false };
@@ -151,7 +151,6 @@ async function applyMissBlacklist(
   }
   writeJson("blacklist.json", bl);
 
-  // DM the user
   try {
     const user = await client.users.fetch(userId);
     await user.send({
@@ -168,7 +167,6 @@ async function applyMissBlacklist(
     });
   } catch { /* DMs closed */ }
 
-  // Log to log channel
   if (logChannelId) {
     try {
       const guild = await client.guilds.fetch(guildId);
@@ -179,9 +177,9 @@ async function applyMissBlacklist(
             .setColor(0xff6b6b)
             .setTitle("⛔ Auto Miss-Vouch Blacklist")
             .addFields(
-              { name: "User", value: `<@${userId}> (${username})`, inline: true },
-              { name: "Miss Count", value: `${count}`, inline: true },
-              { name: "Duration", value: durationText, inline: true },
+              { name: "User",       value: `<@${userId}> (${username})`, inline: true },
+              { name: "Miss Count", value: `${count}`,                   inline: true },
+              { name: "Duration",   value: durationText,                 inline: true },
             )
             .setTimestamp()
           ],
@@ -193,16 +191,10 @@ async function applyMissBlacklist(
 
 // ─── Low stock alert ──────────────────────────────────────────────────────────
 
-async function checkLowStock(
-  client: Client,
-  stockName: string,
-  remaining: number,
-  cfg: Config
-) {
+async function checkLowStock(client: Client, stockName: string, remaining: number, cfg: Config) {
   if (remaining > cfg.lowStockThreshold || !cfg.logChannelId) return;
   try {
-    const guilds = client.guilds.cache.values();
-    for (const guild of guilds) {
+    for (const guild of client.guilds.cache.values()) {
       const ch = guild.channels.cache.get(cfg.logChannelId);
       if (ch?.isTextBased()) {
         await ch.send({
@@ -224,8 +216,7 @@ async function checkLowStock(
 async function logGen(client: Client, userId: string, username: string, stockName: string, cfg: Config, remaining: number) {
   if (!cfg.logChannelId) return;
   try {
-    const guilds = client.guilds.cache.values();
-    for (const guild of guilds) {
+    for (const guild of client.guilds.cache.values()) {
       const ch = guild.channels.cache.get(cfg.logChannelId);
       if (ch?.isTextBased()) {
         await ch.send({
@@ -282,11 +273,10 @@ setInterval(() => {
       for (const [userId, data] of Object.entries(pending)) {
         const age = now - data.pendingSince;
 
-        // Auto-miss: timed out without vouching
         if (age >= TIMEOUT_MS) {
           delete pending[userId];
           changed = true;
-          writeJson("vouches.json", pending); // save immediately before DM/log
+          writeJson("vouches.json", pending);
           try {
             await applyMissBlacklist(client, userId, data.username, cfg.logChannelId, data.guildId);
           } catch (err) {
@@ -295,7 +285,6 @@ setInterval(() => {
           continue;
         }
 
-        // 2-min reminder
         if (!data.warned && age >= TWO_MIN) {
           try {
             const user = await client.users.fetch(userId);
@@ -329,23 +318,51 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   const cfg = getConfig();
 
-  // Vouch channel detection — clear pending + send DM
+  // Vouch channel detection — strict validation
   if (cfg.vouchChannelId && message.channelId === cfg.vouchChannelId && message.guild) {
     const pending = getPending();
-    if (pending[message.author.id]) {
-      delete pending[message.author.id];
-      writeJson("vouches.json", pending);
+    const entry = pending[message.author.id];
+
+    // No pending vouch — delete message silently
+    if (!entry) {
+      try { await message.delete(); } catch { /* no perms */ }
+      return;
+    }
+
+    // Has pending — must mention the stock name
+    const content = message.content.toLowerCase();
+    if (!content.includes(entry.stockName.toLowerCase())) {
+      try { await message.delete(); } catch { /* no perms */ }
       try {
         await message.author.send({
           embeds: [new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle("✅ Vouch Received!")
-            .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!")
+            .setColor(0xed4245)
+            .setTitle("❌ Wrong Vouch Format")
+            .setDescription(
+              `Your message was deleted because it didn't mention the stock name.\n\n` +
+              `Please write your vouch and include: **${entry.stockName}**\n\n` +
+              `Example: \`+rep got ${entry.stockName} fast delivery\``
+            )
             .setTimestamp()
           ],
         });
       } catch { /* DMs closed */ }
+      return;
     }
+
+    // Correct vouch — clear pending and thank
+    delete pending[message.author.id];
+    writeJson("vouches.json", pending);
+    try {
+      await message.author.send({
+        embeds: [new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle("✅ Vouch Received!")
+          .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!")
+          .setTimestamp()
+        ],
+      });
+    } catch { /* DMs closed */ }
     return;
   }
 
@@ -362,7 +379,6 @@ client.on("messageCreate", async (message) => {
   //  USER COMMANDS
   // ══════════════════════════════════════════════════════
 
-  // &help
   if (cmd === "help") {
     await message.channel.send({
       embeds: [new EmbedBuilder()
@@ -410,6 +426,7 @@ client.on("messageCreate", async (message) => {
               `\`${prefix}setlogchannel #channel\``,
               `\`${prefix}setannouncechannel #channel\``,
               `\`${prefix}setautorole <status> @role\``,
+              `\`${prefix}setgenchannel #channel\``,
               `\`${prefix}setgenrole @role\``,
               `\`${prefix}setboostrole @role\``,
               `\`${prefix}setpremiumrole @role\``,
@@ -432,7 +449,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &mystats
   if (cmd === "mystats") {
     const member = message.member!;
     const tier = getUserTier(member, cfg);
@@ -452,10 +468,10 @@ client.on("messageCreate", async (message) => {
         .setColor(0x5865f2)
         .setTitle(`📊 Stats — ${message.author.username}`)
         .addFields(
-          { name: "Tier",       value: `${emoji} ${label}`,                                   inline: true },
-          { name: "Gens Today", value: `${usedToday} / ${dailyLimit}`,                        inline: true },
-          { name: "Cooldown",   value: cooldownLeft > 0 ? msToStr(cooldownLeft) : "Ready ✅", inline: true },
-          { name: "Vouch Misses", value: `${missCount}`,                                      inline: true },
+          { name: "Tier",         value: `${emoji} ${label}`,                                   inline: true },
+          { name: "Gens Today",   value: `${usedToday} / ${dailyLimit}`,                        inline: true },
+          { name: "Cooldown",     value: cooldownLeft > 0 ? msToStr(cooldownLeft) : "Ready ✅", inline: true },
+          { name: "Vouch Misses", value: `${missCount}`,                                        inline: true },
           {
             name: "Blacklist",
             value: listed
@@ -473,12 +489,10 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &stocklist
   if (cmd === "stocklist") {
     const stocks = getStocks();
     const names = Object.keys(stocks);
-    if (names.length === 0)
-      return void message.reply("📦 No stocks have been created yet.");
+    if (names.length === 0) return void message.reply("📦 No stocks have been created yet.");
     const lines = names.map(n =>
       `\`${n}\` — **${stocks[n]!.length}** item(s) ${stocks[n]!.length === 0 ? "*(out of stock)*" : ""}`
     );
@@ -493,12 +507,10 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &gen <name>
   if (cmd === "gen") {
     const name = args[0]?.toLowerCase();
     if (!name) return void message.reply(`Usage: \`${prefix}gen <name>\``);
 
-    // Anti-alt: account age
     if (cfg.minAccountAgeDays > 0) {
       const accountAge = (Date.now() - message.author.createdTimestamp) / 86_400_000;
       if (accountAge < cfg.minAccountAgeDays)
@@ -508,10 +520,11 @@ client.on("messageCreate", async (message) => {
         );
     }
 
-    // Gen role check
-    if (cfg.genRoleId && !message.member!.roles.cache.has(cfg.genRoleId)) {
+    if (cfg.genChannelId && message.channelId !== cfg.genChannelId)
+      return void message.reply(`❌ You can only use \`${prefix}gen\` in <#${cfg.genChannelId}>.`);
+
+    if (cfg.genRoleId && !message.member!.roles.cache.has(cfg.genRoleId))
       return void message.reply(`❌ You need the <@&${cfg.genRoleId}> role to use \`${prefix}gen\`.`);
-    }
 
     const { listed } = checkBlacklist(message.author.id);
     if (listed) return void message.reply("🚫 You are blacklisted and cannot use `gen`.");
@@ -520,7 +533,6 @@ client.on("messageCreate", async (message) => {
     const tier = getUserTier(member, cfg);
     const { cooldownMs, dailyLimit, label, emoji } = TIER[tier];
 
-    // Cooldown check
     const cooldowns = getCooldowns();
     const lastUsed = cooldowns[message.author.id];
     if (lastUsed && Date.now() - lastUsed < cooldownMs) {
@@ -530,7 +542,6 @@ client.on("messageCreate", async (message) => {
       );
     }
 
-    // Daily limit
     const daily = getDailyUsage();
     const today = todayStr();
     const todayCount = daily[message.author.id]?.date === today ? daily[message.author.id]!.count : 0;
@@ -539,7 +550,6 @@ client.on("messageCreate", async (message) => {
         `📵 You've hit your daily limit of **${dailyLimit} gens** (${emoji} ${label}). Come back tomorrow!`
       );
 
-    // Stock
     const stocks = getStocks();
     if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
     if (stocks[name]!.length === 0) return void message.reply(`❌ **${name}** is out of stock!`);
@@ -554,7 +564,6 @@ client.on("messageCreate", async (message) => {
     daily[message.author.id] = { date: today, count: todayCount + 1 };
     writeJson("daily.json", daily);
 
-    // Global stats
     const stats = getGenStats();
     stats.total++;
     stats.byStock[name] = (stats.byStock[name] ?? 0) + 1;
@@ -576,11 +585,8 @@ client.on("messageCreate", async (message) => {
         ],
       });
 
-      await message.reply(
-        `✅ Check your DMs, ${message.author}! (**${todayCount + 1}/${dailyLimit}** gens used today)`
-      );
+      await message.reply(`✅ Check your DMs, ${message.author}! (**${todayCount + 1}/${dailyLimit}** gens used today)`);
 
-      // Register pending vouch
       if (cfg.vouchChannelId) {
         const pending = getPending();
         pending[message.author.id] = {
@@ -593,14 +599,10 @@ client.on("messageCreate", async (message) => {
         writeJson("vouches.json", pending);
       }
 
-      // Log gen
       await logGen(client, message.author.id, message.author.tag, name, cfg, remaining);
-
-      // Low stock alert
       await checkLowStock(client, name, remaining, cfg);
 
     } catch {
-      // Refund
       stocks[name]!.unshift(item);
       writeJson("stocks.json", stocks);
       delete cooldowns[message.author.id];
@@ -615,7 +617,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &stock <name>
   if (cmd === "stock") {
     const name = args[0]?.toLowerCase();
     if (!name) return void message.reply(`Usage: \`${prefix}stock <name>\``);
@@ -630,7 +631,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &checkstatus
   if (cmd === "checkstatus") {
     if (!cfg.autorole)
       return void message.reply(`❌ No autorole configured. Ask an admin to use \`${prefix}setautorole\`.`);
@@ -663,7 +663,6 @@ client.on("messageCreate", async (message) => {
 
   if (!isAdmin(message)) return;
 
-  // &createstock <name>
   if (cmd === "createstock") {
     const name = args[0]?.toLowerCase();
     if (!name) return void message.reply(`Usage: \`${prefix}createstock <name>\``);
@@ -675,7 +674,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &addstock <name> <item>
   if (cmd === "addstock") {
     const name = args[0]?.toLowerCase();
     const item = args.slice(1).join(" ");
@@ -688,7 +686,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &addstocks <name>  (each line after first line = one item)
   if (cmd === "addstocks") {
     const name = args[0]?.toLowerCase();
     if (!name) return void message.reply(`Usage: \`${prefix}addstocks <name>\` then paste items (one per line)`);
@@ -706,7 +703,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &removestock <name>
   if (cmd === "removestock") {
     const name = args[0]?.toLowerCase();
     if (!name) return void message.reply(`Usage: \`${prefix}removestock <name>\``);
@@ -718,7 +714,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &clearstock <name>
   if (cmd === "clearstock") {
     const name = args[0]?.toLowerCase();
     if (!name) return void message.reply(`Usage: \`${prefix}clearstock <name>\``);
@@ -730,7 +725,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &resetcooldown @user
   if (cmd === "resetcooldown") {
     const target = message.mentions.users.first();
     if (!target) return void message.reply(`Usage: \`${prefix}resetcooldown @user\``);
@@ -741,7 +735,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &resetmisses @user
   if (cmd === "resetmisses") {
     const target = message.mentions.users.first();
     if (!target) return void message.reply(`Usage: \`${prefix}resetmisses @user\``);
@@ -752,7 +745,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &resetdaily @user
   if (cmd === "resetdaily") {
     const target = message.mentions.users.first();
     if (!target) return void message.reply(`Usage: \`${prefix}resetdaily @user\``);
@@ -763,7 +755,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &vouchpending
   if (cmd === "vouchpending") {
     const pending = getPending();
     const entries = Object.entries(pending);
@@ -782,7 +773,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &blacklist @user [temp <minutes>]
   if (cmd === "blacklist") {
     const target = message.mentions.users.first();
     if (!target) return void message.reply(`Usage: \`${prefix}blacklist @user [temp <minutes>]\``);
@@ -801,7 +791,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &unblacklist @user
   if (cmd === "unblacklist") {
     const target = message.mentions.users.first();
     if (!target) return void message.reply(`Usage: \`${prefix}unblacklist @user\``);
@@ -814,7 +803,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setprefix <prefix>
   if (cmd === "setprefix") {
     const np = args[0];
     if (!np) return void message.reply(`Usage: \`${prefix}setprefix <new_prefix>\``);
@@ -823,7 +811,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setvouch #channel
   if (cmd === "setvouch") {
     const ch = message.mentions.channels.first();
     if (!ch) return void message.reply(`Usage: \`${prefix}setvouch #channel\``);
@@ -832,16 +819,14 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setlogchannel #channel
   if (cmd === "setlogchannel") {
     const ch = message.mentions.channels.first();
     if (!ch) return void message.reply(`Usage: \`${prefix}setlogchannel #channel\``);
     const c = getConfig(); c.logChannelId = ch.id; writeJson("config.json", c);
-    await message.reply(`✅ Log channel set to ${ch}\nAll gens, low stock alerts, and auto-blacklists will be logged there.`);
+    await message.reply(`✅ Log channel set to ${ch}`);
     return;
   }
 
-  // &setannouncechannel #channel
   if (cmd === "setannouncechannel") {
     const ch = message.mentions.channels.first();
     if (!ch) return void message.reply(`Usage: \`${prefix}setannouncechannel #channel\``);
@@ -850,38 +835,19 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setautorole <status text> @role
-  if (cmd === "setautorole") {
-    const role = message.mentions.roles.first();
-    if (!role) return void message.reply(`Usage: \`${prefix}setautorole <status text> @role\``);
-    const statusText = message.content
-      .slice((prefix + "setautorole").length)
-      .replace(`<@&${role.id}>`, "").trim();
-    if (!statusText) return void message.reply(`Usage: \`${prefix}setautorole <status text> @role\``);
-    const c = getConfig(); c.autorole = { statusText, roleId: role.id }; writeJson("config.json", c);
-    await message.reply(`✅ Autorole set! Status: **"${statusText}"** → ${role}`);
+  if (cmd === "setgenchannel") {
+    const ch = message.mentions.channels.first();
+    if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
+      const c = getConfig(); c.genChannelId = null; writeJson("config.json", c);
+      await message.reply(`✅ Gen channel restriction removed. \`${prefix}gen\` can be used anywhere.`);
+      return;
+    }
+    if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`${prefix}setgenchannel remove\` to disable`);
+    const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
+    await message.reply(`✅ Gen channel set to ${ch}! \`${prefix}gen\` will only work in that channel.`);
     return;
   }
 
-  // &setboostrole @role
-  if (cmd === "setboostrole") {
-    const role = message.mentions.roles.first();
-    if (!role) return void message.reply(`Usage: \`${prefix}setboostrole @role\``);
-    const c = getConfig(); c.boostRoleId = role.id; writeJson("config.json", c);
-    await message.reply(`✅ Boost role set to ${role}! 🚀 45 gens/day · 5 min cooldown`);
-    return;
-  }
-
-  // &setpremiumrole @role
-  if (cmd === "setpremiumrole") {
-    const role = message.mentions.roles.first();
-    if (!role) return void message.reply(`Usage: \`${prefix}setpremiumrole @role\``);
-    const c = getConfig(); c.premiumRoleId = role.id; writeJson("config.json", c);
-    await message.reply(`✅ Premium role set to ${role}! ⭐ 30 gens/day · 7 min cooldown`);
-    return;
-  }
-
-  // &setgenrole @role
   if (cmd === "setgenrole") {
     const role = message.mentions.roles.first();
     if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
@@ -895,7 +861,34 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setlowstock <number>
+  if (cmd === "setautorole") {
+    const role = message.mentions.roles.first();
+    if (!role) return void message.reply(`Usage: \`${prefix}setautorole <status text> @role\``);
+    const statusText = message.content
+      .slice((prefix + "setautorole").length)
+      .replace(`<@&${role.id}>`, "").trim();
+    if (!statusText) return void message.reply(`Usage: \`${prefix}setautorole <status text> @role\``);
+    const c = getConfig(); c.autorole = { statusText, roleId: role.id }; writeJson("config.json", c);
+    await message.reply(`✅ Autorole set! Status: **"${statusText}"** → ${role}`);
+    return;
+  }
+
+  if (cmd === "setboostrole") {
+    const role = message.mentions.roles.first();
+    if (!role) return void message.reply(`Usage: \`${prefix}setboostrole @role\``);
+    const c = getConfig(); c.boostRoleId = role.id; writeJson("config.json", c);
+    await message.reply(`✅ Boost role set to ${role}! 🚀 45 gens/day · 5 min cooldown`);
+    return;
+  }
+
+  if (cmd === "setpremiumrole") {
+    const role = message.mentions.roles.first();
+    if (!role) return void message.reply(`Usage: \`${prefix}setpremiumrole @role\``);
+    const c = getConfig(); c.premiumRoleId = role.id; writeJson("config.json", c);
+    await message.reply(`✅ Premium role set to ${role}! ⭐ 30 gens/day · 7 min cooldown`);
+    return;
+  }
+
   if (cmd === "setlowstock") {
     const n = parseInt(args[0] ?? "", 10);
     if (isNaN(n) || n < 1) return void message.reply(`Usage: \`${prefix}setlowstock <number>\``);
@@ -904,7 +897,6 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setminage <days>
   if (cmd === "setminage") {
     const n = parseInt(args[0] ?? "", 10);
     if (isNaN(n) || n < 0) return void message.reply(`Usage: \`${prefix}setminage <days>\` (0 to disable)`);
@@ -913,16 +905,14 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  // &setvouchtimeout <minutes>
   if (cmd === "setvouchtimeout") {
     const n = parseInt(args[0] ?? "", 10);
     if (isNaN(n) || n < 1) return void message.reply(`Usage: \`${prefix}setvouchtimeout <minutes>\``);
     const c = getConfig(); c.vouchTimeoutMinutes = n; writeJson("config.json", c);
-    await message.reply(`✅ Vouch timeout set to **${n} minutes**. Users who don't vouch within that time will be auto-blacklisted.`);
+    await message.reply(`✅ Vouch timeout set to **${n} minutes**.`);
     return;
   }
 
-  // &announce <message>
   if (cmd === "announce") {
     if (!cfg.announceChannelId)
       return void message.reply(`❌ No announce channel set. Use \`${prefix}setannouncechannel #channel\` first.`);

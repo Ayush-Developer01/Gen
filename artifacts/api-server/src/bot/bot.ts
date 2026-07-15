@@ -23,6 +23,7 @@ interface Config {
   vouchChannelId: string | null;
   logChannelId: string | null;
   announceChannelId: string | null;
+  genChannelId: string | null;
   autorole: { statusText: string; roleId: string } | null;
   boostRoleId: string | null;
   premiumRoleId: string | null;
@@ -75,7 +76,7 @@ function writeJson(file: string, data: unknown) {
 
 const getConfig  = (): Config  => readJson<Config>("config.json", {
   prefix: "&", vouchChannelId: null, logChannelId: null, announceChannelId: null,
-  autorole: null, boostRoleId: null, premiumRoleId: null, genRoleId: null,
+  autorole: null, boostRoleId: null, premiumRoleId: null, genRoleId: null, genChannelId: null,
   lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
 });
 const getStocks         = () => readJson<Stocks>        ("stocks.json",   {});
@@ -321,23 +322,51 @@ export function startBot(): void {
     if (message.author.bot) return;
     const cfg = getConfig();
 
-    // Vouch channel detection — clear pending + send DM
+    // Vouch channel detection — strict validation
     if (cfg.vouchChannelId && message.channelId === cfg.vouchChannelId && message.guild) {
       const pending = getPending();
-      if (pending[message.author.id]) {
-        delete pending[message.author.id];
-        writeJson("vouches.json", pending);
+      const entry = pending[message.author.id];
+
+      // No pending vouch — delete message silently
+      if (!entry) {
+        try { await message.delete(); } catch { /* no perms */ }
+        return;
+      }
+
+      // Has pending — check if they mentioned the stock name
+      const content = message.content.toLowerCase();
+      if (!content.includes(entry.stockName.toLowerCase())) {
+        try { await message.delete(); } catch { /* no perms */ }
         try {
           await message.author.send({
             embeds: [new EmbedBuilder()
-              .setColor(0x57f287)
-              .setTitle("✅ Vouch Received!")
-              .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!")
+              .setColor(0xed4245)
+              .setTitle("❌ Wrong Vouch Format")
+              .setDescription(
+                `Your message was deleted because it didn't mention the stock name.\n\n` +
+                `Please write your vouch and include: **${entry.stockName}**\n\n` +
+                `Example: \`+rep got ${entry.stockName} fast delivery\``
+              )
               .setTimestamp()
             ],
           });
         } catch { /* DMs closed */ }
+        return;
       }
+
+      // Correct vouch — clear pending and send thank you DM
+      delete pending[message.author.id];
+      writeJson("vouches.json", pending);
+      try {
+        await message.author.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0x57f287)
+            .setTitle("✅ Vouch Received!")
+            .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!")
+            .setTimestamp()
+          ],
+        });
+      } catch { /* DMs closed */ }
       return;
     }
 
@@ -402,6 +431,7 @@ export function startBot(): void {
                 `\`${prefix}setlogchannel #channel\``,
                 `\`${prefix}setannouncechannel #channel\``,
                 `\`${prefix}setautorole <status> @role\``,
+                `\`${prefix}setgenchannel #channel\``,
                 `\`${prefix}setgenrole @role\``,
                 `\`${prefix}setboostrole @role\``,
                 `\`${prefix}setpremiumrole @role\``,
@@ -498,6 +528,11 @@ export function startBot(): void {
             `❌ Your account must be at least **${cfg.minAccountAgeDays} day(s)** old to use \`${prefix}gen\`.\n` +
             `Your account is **${Math.floor(accountAge)} day(s)** old.`
           );
+      }
+
+      // Gen channel check
+      if (cfg.genChannelId && message.channelId !== cfg.genChannelId) {
+        return void message.reply(`❌ You can only use \`${prefix}gen\` in <#${cfg.genChannelId}>.`);
       }
 
       // Gen role check
@@ -870,6 +905,20 @@ export function startBot(): void {
       if (!role) return void message.reply(`Usage: \`${prefix}setpremiumrole @role\``);
       const c = getConfig(); c.premiumRoleId = role.id; writeJson("config.json", c);
       await message.reply(`✅ Premium role set to ${role}! ⭐ 30 gens/day · 7 min cooldown`);
+      return;
+    }
+
+    // &setgenchannel #channel
+    if (cmd === "setgenchannel") {
+      const ch = message.mentions.channels.first();
+      if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
+        const c = getConfig(); c.genChannelId = null; writeJson("config.json", c);
+        await message.reply(`✅ Gen channel restriction removed. \`${prefix}gen\` can be used anywhere.`);
+        return;
+      }
+      if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`${prefix}setgenchannel remove\` to disable`);
+      const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
+      await message.reply(`✅ Gen channel set to ${ch}! \`${prefix}gen\` will only work in that channel.`);
       return;
     }
 
