@@ -341,7 +341,7 @@ client.on("messageCreate", async (message) => {
             .setDescription(
               `Your message was deleted because it didn't mention the stock name.\n\n` +
               `Please write your vouch and include: **${entry.stockName}**\n\n` +
-              `Example: \`+rep got ${entry.stockName} fast delivery\``
+              `Example: \`legit got ${entry.stockName} from ping your bot\``
             )
             .setTimestamp()
           ],
