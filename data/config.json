@@ -1,0 +1,15 @@
+{
+  "prefix": "&",
+  "vouchChannelId": null,
+  "logChannelId": null,
+  "announceChannelId": null,
+  "autorole": {
+    "statusText": "Anjaan op",
+    "roleId": "1523735238142988419"
+  },
+  "boostRoleId": null,
+  "premiumRoleId": null,
+  "lowStockThreshold": 5,
+  "minAccountAgeDays": 0,
+  "vouchTimeoutMinutes": 60
+}
