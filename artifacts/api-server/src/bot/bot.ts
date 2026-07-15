@@ -26,6 +26,7 @@ interface Config {
   autorole: { statusText: string; roleId: string } | null;
   boostRoleId: string | null;
   premiumRoleId: string | null;
+  genRoleId: string | null;
   lowStockThreshold: number;
   minAccountAgeDays: number;
   vouchTimeoutMinutes: number;
@@ -74,7 +75,7 @@ function writeJson(file: string, data: unknown) {
 
 const getConfig  = (): Config  => readJson<Config>("config.json", {
   prefix: "&", vouchChannelId: null, logChannelId: null, announceChannelId: null,
-  autorole: null, boostRoleId: null, premiumRoleId: null,
+  autorole: null, boostRoleId: null, premiumRoleId: null, genRoleId: null,
   lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 60,
 });
 const getStocks         = () => readJson<Stocks>        ("stocks.json",   {});
@@ -379,6 +380,7 @@ export function startBot(): void {
                 `\`${prefix}setlogchannel #channel\``,
                 `\`${prefix}setannouncechannel #channel\``,
                 `\`${prefix}setautorole <status> @role\``,
+                `\`${prefix}setgenrole @role\``,
                 `\`${prefix}setboostrole @role\``,
                 `\`${prefix}setpremiumrole @role\``,
                 `\`${prefix}setlowstock <number>\``,
@@ -474,6 +476,11 @@ export function startBot(): void {
             `❌ Your account must be at least **${cfg.minAccountAgeDays} day(s)** old to use \`${prefix}gen\`.\n` +
             `Your account is **${Math.floor(accountAge)} day(s)** old.`
           );
+      }
+
+      // Gen role check
+      if (cfg.genRoleId && !message.member!.roles.cache.has(cfg.genRoleId)) {
+        return void message.reply(`❌ You need the <@&${cfg.genRoleId}> role to use \`${prefix}gen\`.`);
       }
 
       const { listed } = checkBlacklist(message.author.id);
@@ -841,6 +848,20 @@ export function startBot(): void {
       if (!role) return void message.reply(`Usage: \`${prefix}setpremiumrole @role\``);
       const c = getConfig(); c.premiumRoleId = role.id; writeJson("config.json", c);
       await message.reply(`✅ Premium role set to ${role}! ⭐ 30 gens/day · 7 min cooldown`);
+      return;
+    }
+
+    // &setgenrole @role
+    if (cmd === "setgenrole") {
+      const role = message.mentions.roles.first();
+      if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
+        const c = getConfig(); c.genRoleId = null; writeJson("config.json", c);
+        await message.reply(`✅ Gen role restriction removed. Anyone can now use \`${prefix}gen\`.`);
+        return;
+      }
+      if (!role) return void message.reply(`Usage: \`${prefix}setgenrole @role\` | \`${prefix}setgenrole remove\` to disable`);
+      const c = getConfig(); c.genRoleId = role.id; writeJson("config.json", c);
+      await message.reply(`✅ Gen role set to ${role}! Only members with this role can use \`${prefix}gen\`.`);
       return;
     }
 
