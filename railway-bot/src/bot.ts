@@ -329,9 +329,9 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    // Has pending — must mention the stock name
+    // Has pending — must start with "legit got" AND contain the stock name
     const content = message.content.toLowerCase();
-    if (!content.includes(entry.stockName.toLowerCase())) {
+    if (!content.startsWith("legit got") || !content.includes(entry.stockName.toLowerCase())) {
       try { await message.delete(); } catch { /* no perms */ }
       try {
         await message.author.send({
