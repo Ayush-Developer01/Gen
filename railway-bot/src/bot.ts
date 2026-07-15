@@ -269,48 +269,59 @@ const client = new Client({
 client.once("clientReady", () => logger.info(`Bot logged in as ${client.user?.tag}`));
 
 // ── Periodic check: 2-min warning + auto-miss ─────────────────────────────
-setInterval(async () => {
-  const pending = getPending();
-  const cfg = getConfig();
-  const now = Date.now();
-  const TWO_MIN = 2 * 60_000;
-  const TIMEOUT_MS = cfg.vouchTimeoutMinutes * 60_000;
-  let changed = false;
+setInterval(() => {
+  void (async () => {
+    try {
+      const pending = getPending();
+      const cfg = getConfig();
+      const now = Date.now();
+      const TWO_MIN = 2 * 60_000;
+      const TIMEOUT_MS = cfg.vouchTimeoutMinutes * 60_000;
+      let changed = false;
 
-  for (const [userId, data] of Object.entries(pending)) {
-    const age = now - data.pendingSince;
+      for (const [userId, data] of Object.entries(pending)) {
+        const age = now - data.pendingSince;
 
-    // Auto-miss: timed out without vouching
-    if (age >= TIMEOUT_MS) {
-      delete pending[userId];
-      changed = true;
-      await applyMissBlacklist(client, userId, data.username, cfg.logChannelId, data.guildId);
-      continue;
+        // Auto-miss: timed out without vouching
+        if (age >= TIMEOUT_MS) {
+          delete pending[userId];
+          changed = true;
+          writeJson("vouches.json", pending); // save immediately before DM/log
+          try {
+            await applyMissBlacklist(client, userId, data.username, cfg.logChannelId, data.guildId);
+          } catch (err) {
+            logger.error(`applyMissBlacklist failed for ${userId}`, err);
+          }
+          continue;
+        }
+
+        // 2-min reminder
+        if (!data.warned && age >= TWO_MIN) {
+          try {
+            const user = await client.users.fetch(userId);
+            const vouchMention = cfg.vouchChannelId ? `<#${cfg.vouchChannelId}>` : "the vouch channel";
+            await user.send({
+              embeds: [new EmbedBuilder()
+                .setColor(0xfee75c)
+                .setTitle("⚠️ Vouch Reminder")
+                .setDescription(
+                  `You received an item from **${data.stockName}** but haven't vouched yet!\n\n` +
+                  `✅ **Vouch here:** ${vouchMention}\n\n` +
+                  `⛔ **You will be automatically blacklisted if you don't vouch.**`
+                )
+                .setTimestamp()
+              ],
+            });
+          } catch { /* DMs closed */ }
+          pending[userId]!.warned = true;
+          changed = true;
+        }
+      }
+      if (changed) writeJson("vouches.json", pending);
+    } catch (err) {
+      logger.error("Vouch interval error", err);
     }
-
-    // 2-min reminder
-    if (!data.warned && age >= TWO_MIN) {
-      try {
-        const user = await client.users.fetch(userId);
-        const vouchMention = cfg.vouchChannelId ? `<#${cfg.vouchChannelId}>` : "the vouch channel";
-        await user.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0xfee75c)
-            .setTitle("⚠️ Vouch Reminder")
-            .setDescription(
-              `You received an item from **${data.stockName}** but haven't vouched yet!\n\n` +
-              `✅ **Vouch here:** ${vouchMention}\n\n` +
-              `⛔ **You will be automatically blacklisted if you don't vouch.**`
-            )
-            .setTimestamp()
-          ],
-        });
-      } catch { /* DMs closed */ }
-      pending[userId]!.warned = true;
-      changed = true;
-    }
-  }
-  if (changed) writeJson("vouches.json", pending);
+  })();
 }, 30_000);
 
 // ── Message handler ───────────────────────────────────────────────────────
