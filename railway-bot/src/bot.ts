@@ -329,12 +329,22 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   const cfg = getConfig();
 
-  // Vouch channel detection — clear pending
+  // Vouch channel detection — clear pending + send DM
   if (cfg.vouchChannelId && message.channelId === cfg.vouchChannelId && message.guild) {
     const pending = getPending();
     if (pending[message.author.id]) {
       delete pending[message.author.id];
       writeJson("vouches.json", pending);
+      try {
+        await message.author.send({
+          embeds: [new EmbedBuilder()
+            .setColor(0x57f287)
+            .setTitle("✅ Vouch Received!")
+            .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!")
+            .setTimestamp()
+          ],
+        });
+      } catch { /* DMs closed */ }
     }
     return;
   }
