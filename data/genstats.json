@@ -1,6 +1,7 @@
 {
-  "total": 7,
+  "total": 8,
   "byStock": {
-    "mcfa": 7
+    "mcfa": 7,
+    "netflix": 1
   }
 }
