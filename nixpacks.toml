@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = ["nodejs_18", "pnpm_9", "openssl"]
+
+[phases.install]
+cmds = ["cd railway-bot && npm install"]
+
+[phases.build]
+cmds = ["cd railway-bot && npm run build"]
+
+[start]
+cmd = "cd railway-bot && npm start"
