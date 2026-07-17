@@ -1,15 +1,17 @@
 {
-  "mcfa": [
-    "yoo",
-    "yoo",
-    "yoo",
-    "yoo",
-    "yoo"
-  ],
-  "netflix": [
-    "chal jaa",
-    "chal jaa",
-    "chal jaa",
-    "chal jaa"
-  ]
+  "free": {
+    "mcfa": [
+      "yoo",
+      "yoo",
+      "yoo"
+    ],
+    "netflix": [
+      "chal jaa",
+      "chal jaa",
+      "chal jaa",
+      "chal jaa"
+    ]
+  },
+  "premium": {},
+  "boost": {}
 }
