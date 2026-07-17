@@ -227,8 +227,13 @@ async function handleGen(
   const userTier = getUserTier(message.member, cfg);
   const prefix = cfg.prefix;
 
-  const tierOrder: Tier[] = ["free", "premium", "boost"];
-  if (tierOrder.indexOf(userTier) < tierOrder.indexOf(stockTier)) {
+  // Boost: free + boost only | Premium: free + premium only | Free: free only
+  const allowed: Record<Tier, Tier[]> = {
+    free:    ["free"],
+    premium: ["free", "premium"],
+    boost:   ["free", "boost"],
+  };
+  if (!allowed[userTier].includes(stockTier)) {
     const needed = stockTier === "premium" ? "Premium ⭐" : "Boost 🚀";
     return void message.reply(`❌ You need the **${needed}** role to use \`${prefix}${stockTier}\`.`);
   }
@@ -244,7 +249,9 @@ async function handleGen(
   if (cfg.genChannelId && message.channelId !== cfg.genChannelId)
     return void message.reply(`❌ Use \`${prefix}${stockTier}\` only in <#${cfg.genChannelId}>.`);
 
-  if (cfg.genRoleId && !message.member.roles.cache.has(cfg.genRoleId))
+  // Boost/Premium users skip genRole check — only free users need it
+  const isPrivileged = userTier === "boost" || userTier === "premium";
+  if (!isPrivileged && cfg.genRoleId && !message.member.roles.cache.has(cfg.genRoleId))
     return void message.reply(`❌ You need the <@&${cfg.genRoleId}> role.`);
 
   const { listed } = checkBlacklist(message.author.id);
@@ -452,7 +459,7 @@ client.on("messageCreate", async (message) => {
     const admin = isAdmin(message);
 
     const userFields: string[] = [`\`${prefix}free <stock>\` — Gen from Free stocks 👤`];
-    if (userTier === "premium" || userTier === "boost")
+    if (userTier === "premium")
       userFields.push(`\`${prefix}premium <stock>\` — Gen from Premium stocks ⭐`);
     if (userTier === "boost")
       userFields.push(`\`${prefix}boost <stock>\` — Gen from Boost stocks 🚀`);
