@@ -251,8 +251,9 @@ async function handleGen(
   if (cfg.genChannelId && message.channelId !== cfg.genChannelId)
     return void message.reply(`❌ Use \`${prefix}${stockTier}\` only in <#${cfg.genChannelId}>.`);
 
-  // Gen role
-  if (cfg.genRoleId && !message.member.roles.cache.has(cfg.genRoleId))
+  // Gen role — skip check for boost/premium users (they don't need status role)
+  const isPrivileged = userTier === "boost" || userTier === "premium";
+  if (!isPrivileged && cfg.genRoleId && !message.member.roles.cache.has(cfg.genRoleId))
     return void message.reply(`❌ You need the <@&${cfg.genRoleId}> role.`);
 
   // Blacklist
