@@ -7,10 +7,11 @@
     "statusText": "Anjaan op",
     "roleId": "1523735238142988419"
   },
-  "boostRoleId": null,
+  "boostRoleId": "1527249828751605780",
   "premiumRoleId": null,
   "lowStockThreshold": 5,
   "minAccountAgeDays": 0,
   "vouchTimeoutMinutes": 3,
-  "genRoleId": "1523735238142988419"
+  "genRoleId": "1523735238142988419",
+  "genChannelId": "1523735358251208775"
 }

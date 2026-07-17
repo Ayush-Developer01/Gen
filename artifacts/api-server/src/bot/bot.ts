@@ -33,25 +33,29 @@ interface Config {
   vouchTimeoutMinutes: number;
 }
 
-interface BlacklistEntry {
-  id: string;
-  type: "temp" | "perm";
-  until?: number;
-}
+interface BlacklistEntry { id: string; type: "temp" | "perm"; until?: number }
 interface Blacklist  { users: BlacklistEntry[] }
-interface Stocks     { [name: string]: string[] }
+
+// Tiered stocks: each tier has its own named stocks
+interface TieredStocks {
+  free:    { [name: string]: string[] };
+  premium: { [name: string]: string[] };
+  boost:   { [name: string]: string[] };
+}
+
 interface Cooldowns  { [userId: string]: number }
 interface DailyUsage { [userId: string]: { date: string; count: number } }
 interface PendingVouch {
   pendingSince: number;
   warned: boolean;
   stockName: string;
+  tier: string;
   guildId: string;
   username: string;
 }
 interface PendingVouches { [userId: string]: PendingVouch }
-interface MissCount      { [userId: string]: number }
-interface GenStats        { total: number; byStock: { [name: string]: number } }
+interface MissCount { [userId: string]: number }
+interface GenStats  { total: number; byStock: { [name: string]: number } }
 
 // ─── Tier config ──────────────────────────────────────────────────────────────
 
@@ -61,7 +65,7 @@ const TIER: Record<Tier, { cooldownMs: number; dailyLimit: number; label: string
   premium: { cooldownMs: 7  * 60_000, dailyLimit: 30, label: "Premium", emoji: "⭐" },
   free:    { cooldownMs: 10 * 60_000, dailyLimit: 20, label: "Free",    emoji: "👤" },
 };
-const MISS_DURATIONS = [0, 30, 40, 50, 60]; // minutes; index = miss count
+const MISS_DURATIONS = [0, 30, 40, 50, 60];
 
 // ─── Data helpers ─────────────────────────────────────────────────────────────
 
@@ -74,18 +78,30 @@ function writeJson(file: string, data: unknown) {
   fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
-const getConfig  = (): Config  => readJson<Config>("config.json", {
+const DEFAULT_STOCKS: TieredStocks = { free: {}, premium: {}, boost: {} };
+
+const getConfig = (): Config => readJson<Config>("config.json", {
   prefix: "&", vouchChannelId: null, logChannelId: null, announceChannelId: null,
-  autorole: null, boostRoleId: null, premiumRoleId: null, genRoleId: null, genChannelId: null,
-  lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
+  genChannelId: null, autorole: null, boostRoleId: null, premiumRoleId: null,
+  genRoleId: null, lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
 });
-const getStocks         = () => readJson<Stocks>        ("stocks.json",   {});
-const getBlacklist      = () => readJson<Blacklist>     ("blacklist.json",{ users: [] });
-const getCooldowns      = () => readJson<Cooldowns>     ("cooldowns.json",{});
-const getDailyUsage     = () => readJson<DailyUsage>    ("daily.json",    {});
-const getPending        = () => readJson<PendingVouches>("vouches.json",  {});
-const getMisses         = () => readJson<MissCount>     ("misses.json",   {});
-const getGenStats       = () => readJson<GenStats>      ("genstats.json", { total: 0, byStock: {} });
+
+function getStocks(): TieredStocks {
+  const raw = readJson<unknown>("stocks.json", DEFAULT_STOCKS);
+  // migrate old flat format
+  if (raw && typeof raw === "object" && !("free" in raw)) {
+    return { free: raw as { [k: string]: string[] }, premium: {}, boost: {} };
+  }
+  const s = raw as TieredStocks;
+  return { free: s.free ?? {}, premium: s.premium ?? {}, boost: s.boost ?? {} };
+}
+
+const getBlacklist  = () => readJson<Blacklist>     ("blacklist.json",{ users: [] });
+const getCooldowns  = () => readJson<Cooldowns>     ("cooldowns.json",{});
+const getDailyUsage = () => readJson<DailyUsage>    ("daily.json",    {});
+const getPending    = () => readJson<PendingVouches>("vouches.json",  {});
+const getMisses     = () => readJson<MissCount>     ("misses.json",   {});
+const getGenStats   = () => readJson<GenStats>      ("genstats.json", { total: 0, byStock: {} });
 
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 
@@ -105,7 +121,6 @@ function checkBlacklist(userId: string): { listed: boolean; entry?: BlacklistEnt
   if (!entry) return { listed: false };
   if (entry.type === "perm") return { listed: true, entry };
   if (entry.type === "temp" && entry.until && Date.now() < entry.until) return { listed: true, entry };
-  // Expired — purge
   bl.users = bl.users.filter(u => !(u.id === userId && u.type === "temp" && u.until && Date.now() >= u.until));
   writeJson("blacklist.json", bl);
   return { listed: false };
@@ -120,11 +135,8 @@ function msToStr(ms: number) {
 // ─── Auto-miss blacklist ───────────────────────────────────────────────────────
 
 async function applyMissBlacklist(
-  client: Client,
-  userId: string,
-  username: string,
-  logChannelId: string | null,
-  guildId: string
+  client: Client, userId: string, username: string,
+  logChannelId: string | null, guildId: string
 ): Promise<void> {
   const misses = getMisses();
   const count = (misses[userId] ?? 0) + 1;
@@ -133,9 +145,7 @@ async function applyMissBlacklist(
 
   const bl = getBlacklist();
   bl.users = bl.users.filter(u => u.id !== userId);
-
   let durationText: string;
-  let color = 0xed4245;
   if (count >= 5) {
     bl.users.push({ id: userId, type: "perm" });
     durationText = "**permanently**";
@@ -146,68 +156,34 @@ async function applyMissBlacklist(
   }
   writeJson("blacklist.json", bl);
 
-  // DM the user
   try {
     const user = await client.users.fetch(userId);
-    await user.send({
-      embeds: [new EmbedBuilder()
-        .setColor(color)
-        .setTitle("⛔ You Have Been Blacklisted")
-        .setDescription(
-          `You have been blacklisted ${durationText} for missing your vouch.\n\n` +
-          `**Miss count:** ${count}${count >= 5 ? " — Permanent ban" : ""}\n\n` +
-          `If you think this is a mistake, **make a ticket** in the server.`
-        )
-        .setTimestamp()
-      ],
-    });
+    await user.send({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle("⛔ You Have Been Blacklisted")
+      .setDescription(`You have been blacklisted ${durationText} for missing your vouch.\n\n**Miss count:** ${count}${count >= 5 ? " — Permanent ban" : ""}\n\nIf you think this is a mistake, **make a ticket** in the server.`).setTimestamp()] });
   } catch { /* DMs closed */ }
 
-  // Log to log channel
   if (logChannelId) {
     try {
       const guild = await client.guilds.fetch(guildId);
       const ch = guild.channels.cache.get(logChannelId);
       if (ch?.isTextBased()) {
-        await ch.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0xff6b6b)
-            .setTitle("⛔ Auto Miss-Vouch Blacklist")
-            .addFields(
-              { name: "User", value: `<@${userId}> (${username})`, inline: true },
-              { name: "Miss Count", value: `${count}`, inline: true },
-              { name: "Duration", value: durationText, inline: true },
-            )
-            .setTimestamp()
-          ],
-        });
+        await ch.send({ embeds: [new EmbedBuilder().setColor(0xff6b6b).setTitle("⛔ Auto Miss-Vouch Blacklist")
+          .addFields({ name: "User", value: `<@${userId}> (${username})`, inline: true }, { name: "Miss Count", value: `${count}`, inline: true }, { name: "Duration", value: durationText, inline: true }).setTimestamp()] });
       }
-    } catch { /* log channel error */ }
+    } catch { /* log error */ }
   }
 }
 
 // ─── Low stock alert ──────────────────────────────────────────────────────────
 
-async function checkLowStock(
-  client: Client,
-  stockName: string,
-  remaining: number,
-  cfg: Config
-) {
+async function checkLowStock(client: Client, stockName: string, tier: string, remaining: number, cfg: Config) {
   if (remaining > cfg.lowStockThreshold || !cfg.logChannelId) return;
   try {
-    const guilds = client.guilds.cache.values();
-    for (const guild of guilds) {
+    for (const guild of client.guilds.cache.values()) {
       const ch = guild.channels.cache.get(cfg.logChannelId);
       if (ch?.isTextBased()) {
-        await ch.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0xfee75c)
-            .setTitle("⚠️ Low Stock Alert")
-            .setDescription(`Stock **${stockName}** has only **${remaining}** item(s) left!`)
-            .setTimestamp()
-          ],
-        });
+        await ch.send({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle("⚠️ Low Stock Alert")
+          .setDescription(`**[${tier.toUpperCase()}]** Stock **${stockName}** has only **${remaining}** item(s) left!`).setTimestamp()] });
         break;
       }
     }
@@ -216,29 +192,143 @@ async function checkLowStock(
 
 // ─── Gen log ──────────────────────────────────────────────────────────────────
 
-async function logGen(client: Client, userId: string, username: string, stockName: string, cfg: Config, remaining: number) {
+async function logGen(client: Client, userId: string, username: string, stockName: string, tier: string, cfg: Config, remaining: number) {
   if (!cfg.logChannelId) return;
   try {
-    const guilds = client.guilds.cache.values();
-    for (const guild of guilds) {
+    for (const guild of client.guilds.cache.values()) {
       const ch = guild.channels.cache.get(cfg.logChannelId);
       if (ch?.isTextBased()) {
-        await ch.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle("📦 Gen Log")
-            .addFields(
-              { name: "User",  value: `<@${userId}> (${username})`, inline: true },
-              { name: "Stock", value: stockName,                     inline: true },
-              { name: "Left",  value: `${remaining} items`,          inline: true },
-            )
-            .setTimestamp()
-          ],
-        });
+        await ch.send({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle("📦 Gen Log")
+          .addFields(
+            { name: "User",  value: `<@${userId}> (${username})`, inline: true },
+            { name: "Stock", value: `[${tier.toUpperCase()}] ${stockName}`, inline: true },
+            { name: "Left",  value: `${remaining} items`, inline: true }
+          ).setTimestamp()] });
         break;
       }
     }
   } catch { /* ignore */ }
+}
+
+// ─── Core gen logic ───────────────────────────────────────────────────────────
+
+async function handleGen(
+  message: Message,
+  client: Client,
+  stockTier: Tier,   // which stock pool to pull from
+  stockName: string,
+  cfg: Config
+) {
+  if (!message.guild || !message.member) return;
+
+  const userTier = getUserTier(message.member, cfg);
+  const prefix = cfg.prefix;
+
+  // Tier access check
+  const tierOrder: Tier[] = ["free", "premium", "boost"];
+  if (tierOrder.indexOf(userTier) < tierOrder.indexOf(stockTier)) {
+    const needed = stockTier === "premium" ? "Premium ⭐" : "Boost 🚀";
+    return void message.reply(`❌ You need the **${needed}** role to use \`${prefix}${stockTier}\`.`);
+  }
+
+  // Account age
+  if (cfg.minAccountAgeDays > 0) {
+    const accountAge = (Date.now() - message.author.createdTimestamp) / 86_400_000;
+    if (accountAge < cfg.minAccountAgeDays)
+      return void message.reply(
+        `❌ Your account must be at least **${cfg.minAccountAgeDays} day(s)** old.\nYours is **${Math.floor(accountAge)} day(s)** old.`
+      );
+  }
+
+  // Gen channel
+  if (cfg.genChannelId && message.channelId !== cfg.genChannelId)
+    return void message.reply(`❌ Use \`${prefix}${stockTier}\` only in <#${cfg.genChannelId}>.`);
+
+  // Gen role
+  if (cfg.genRoleId && !message.member.roles.cache.has(cfg.genRoleId))
+    return void message.reply(`❌ You need the <@&${cfg.genRoleId}> role.`);
+
+  // Blacklist
+  const { listed } = checkBlacklist(message.author.id);
+  if (listed) return void message.reply("🚫 You are blacklisted and cannot gen.");
+
+  const { cooldownMs, dailyLimit, label, emoji } = TIER[userTier];
+
+  // Cooldown
+  const cooldowns = getCooldowns();
+  const lastUsed = cooldowns[message.author.id];
+  if (lastUsed && Date.now() - lastUsed < cooldownMs) {
+    const left = cooldownMs - (Date.now() - lastUsed);
+    return void message.reply(`⏳ Wait **${msToStr(left)}** before genning again.\n${emoji} ${label} cooldown: ${cooldownMs / 60_000} min`);
+  }
+
+  // Daily limit
+  const daily = getDailyUsage();
+  const today = todayStr();
+  const todayCount = daily[message.author.id]?.date === today ? daily[message.author.id]!.count : 0;
+  if (todayCount >= dailyLimit)
+    return void message.reply(`📵 Daily limit reached: **${dailyLimit} gens** (${emoji} ${label}). Come back tomorrow!`);
+
+  // Stock
+  const stocks = getStocks();
+  const pool = stocks[stockTier];
+  if (!pool[stockName]) return void message.reply(`❌ Stock \`${stockName}\` does not exist in **${stockTier}** tier.`);
+  if (pool[stockName]!.length === 0) return void message.reply(`❌ **${stockName}** (${stockTier}) is out of stock!`);
+
+  const item = pool[stockName]!.shift()!;
+  const remaining = pool[stockName]!.length;
+  writeJson("stocks.json", stocks);
+
+  cooldowns[message.author.id] = Date.now();
+  writeJson("cooldowns.json", cooldowns);
+
+  daily[message.author.id] = { date: today, count: todayCount + 1 };
+  writeJson("daily.json", daily);
+
+  const stats = getGenStats();
+  stats.total++;
+  stats.byStock[stockName] = (stats.byStock[stockName] ?? 0) + 1;
+  writeJson("genstats.json", stats);
+
+  const vouchLine = cfg.vouchChannelId
+    ? `\n\n✅ **Vouch here:** <#${cfg.vouchChannelId}>\n⚠️ **No vouch = auto-blacklist**`
+    : "";
+
+  try {
+    await message.author.send({ embeds: [new EmbedBuilder().setColor(0x57f287)
+      .setTitle(`📦 Your item — ${stockName} [${stockTier.toUpperCase()}]`)
+      .setDescription(`\`\`\`\n${item}\n\`\`\`${vouchLine}`)
+      .addFields({ name: "Your Tier", value: `${emoji} ${label} — ${todayCount + 1}/${dailyLimit} gens today`, inline: true })
+      .setFooter({ text: "Enjoy! Remember to vouch." }).setTimestamp()] });
+
+    await message.reply(`✅ Check your DMs, ${message.author}! (**${todayCount + 1}/${dailyLimit}** gens today)`);
+
+    if (cfg.vouchChannelId) {
+      const pending = getPending();
+      pending[message.author.id] = {
+        pendingSince: Date.now(), warned: false,
+        stockName, tier: stockTier,
+        guildId: message.guild.id, username: message.author.tag,
+      };
+      writeJson("vouches.json", pending);
+    }
+
+    await logGen(client, message.author.id, message.author.tag, stockName, stockTier, cfg, remaining);
+    await checkLowStock(client, stockName, stockTier, remaining, cfg);
+
+  } catch {
+    // Refund
+    pool[stockName]!.unshift(item);
+    writeJson("stocks.json", stocks);
+    delete cooldowns[message.author.id];
+    writeJson("cooldowns.json", cooldowns);
+    daily[message.author.id] = { date: today, count: todayCount };
+    writeJson("daily.json", daily);
+    stats.total--;
+    stats.byStock[stockName] = Math.max(0, (stats.byStock[stockName] ?? 1) - 1);
+    writeJson("genstats.json", stats);
+    await message.reply("❌ Could not DM you. Please open your DMs and try again.");
+  }
 }
 
 // ─── Bot ──────────────────────────────────────────────────────────────────────
@@ -256,64 +346,63 @@ export function startBot(): void {
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.DirectMessages,
     ],
-    partials: [Partials.Channel, Partials.Message],
+    partials: [Partials.Channel, Partials.Message, Partials.GuildMember],
   });
 
-  client.once("ready", () => logger.info(`Bot logged in as ${client.user?.tag}`));
+  client.once("clientReady", () => logger.info(`Bot logged in as ${client.user?.tag}`));
 
-  // ── Periodic check: 2-min warning + auto-miss ─────────────────────────────
+  // ── Status role auto-remove ───────────────────────────────────────────────
+  client.on("presenceUpdate", async (_old, newPresence) => {
+    try {
+      const cfg = getConfig();
+      if (!cfg.autorole || !newPresence?.member) return;
+      const { statusText, roleId } = cfg.autorole;
+      const member = newPresence.member;
+      if (!member.roles.cache.has(roleId)) return;
+      const activity = newPresence.activities.find(a => a.type === ActivityType.Custom);
+      const currentStatus = activity?.state ?? "";
+      if (!currentStatus.toLowerCase().includes(statusText.toLowerCase())) {
+        await member.roles.remove(roleId);
+      }
+    } catch { /* ignore */ }
+  });
+
+  // ── Vouch interval ────────────────────────────────────────────────────────
   setInterval(() => {
     void (async () => {
       try {
         const pending = getPending();
         const cfg = getConfig();
         const now = Date.now();
-        const TWO_MIN = 2 * 60_000;
         const TIMEOUT_MS = cfg.vouchTimeoutMinutes * 60_000;
+        const TWO_MIN = 2 * 60_000;
         let changed = false;
 
         for (const [userId, data] of Object.entries(pending)) {
           const age = now - data.pendingSince;
 
-          // Auto-miss: timed out without vouching
           if (age >= TIMEOUT_MS) {
             delete pending[userId];
             changed = true;
-            writeJson("vouches.json", pending); // save immediately before DM/log
-            try {
-              await applyMissBlacklist(client, userId, data.username, cfg.logChannelId, data.guildId);
-            } catch (err) {
-              logger.error({ err }, `applyMissBlacklist failed for ${userId}`);
-            }
+            writeJson("vouches.json", pending);
+            try { await applyMissBlacklist(client, userId, data.username, cfg.logChannelId, data.guildId); }
+            catch (err) { logger.error({ err }, `applyMissBlacklist failed for ${userId}`); }
             continue;
           }
 
-          // 2-min reminder
           if (!data.warned && age >= TWO_MIN) {
             try {
               const user = await client.users.fetch(userId);
               const vouchMention = cfg.vouchChannelId ? `<#${cfg.vouchChannelId}>` : "the vouch channel";
-              await user.send({
-                embeds: [new EmbedBuilder()
-                  .setColor(0xfee75c)
-                  .setTitle("⚠️ Vouch Reminder")
-                  .setDescription(
-                    `You received an item from **${data.stockName}** but haven't vouched yet!\n\n` +
-                    `✅ **Vouch here:** ${vouchMention}\n\n` +
-                    `⛔ **You will be automatically blacklisted if you don't vouch.**`
-                  )
-                  .setTimestamp()
-                ],
-              });
+              await user.send({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle("⚠️ Vouch Reminder")
+                .setDescription(`You received **${data.stockName}** but haven't vouched yet!\n\n✅ **Vouch here:** ${vouchMention}\n\n⛔ **No vouch = auto-blacklist**`).setTimestamp()] });
             } catch { /* DMs closed */ }
             pending[userId]!.warned = true;
             changed = true;
           }
         }
         if (changed) writeJson("vouches.json", pending);
-      } catch (err) {
-        logger.error({ err }, "Vouch interval error");
-      }
+      } catch (err) { logger.error({ err }, "Vouch interval error"); }
     })();
   }, 30_000);
 
@@ -322,50 +411,31 @@ export function startBot(): void {
     if (message.author.bot) return;
     const cfg = getConfig();
 
-    // Vouch channel detection — strict validation
+    // ── Vouch channel: strict validation ─────────────────────────────────
     if (cfg.vouchChannelId && message.channelId === cfg.vouchChannelId && message.guild) {
       const pending = getPending();
       const entry = pending[message.author.id];
 
-      // No pending vouch — delete message silently
       if (!entry) {
         try { await message.delete(); } catch { /* no perms */ }
         return;
       }
 
-      // Has pending — must start with "legit got" AND contain the stock name
       const content = message.content.toLowerCase();
       if (!content.startsWith("legit got") || !content.includes(entry.stockName.toLowerCase())) {
         try { await message.delete(); } catch { /* no perms */ }
         try {
-          await message.author.send({
-            embeds: [new EmbedBuilder()
-              .setColor(0xed4245)
-              .setTitle("❌ Wrong Vouch Format")
-              .setDescription(
-                `Your message was deleted because it didn't mention the stock name.\n\n` +
-                `Please write your vouch and include: **${entry.stockName}**\n\n` +
-                `Example: \`legit got ${entry.stockName} from ping me\``
-              )
-              .setTimestamp()
-            ],
-          });
+          await message.author.send({ embeds: [new EmbedBuilder().setColor(0xed4245).setTitle("❌ Wrong Vouch Format")
+            .setDescription(`Your message was deleted.\n\nYour vouch must:\n• Start with **legit got**\n• Include the stock name: **${entry.stockName}**\n\nExample: \`legit got ${entry.stockName} from ping me\``).setTimestamp()] });
         } catch { /* DMs closed */ }
         return;
       }
 
-      // Correct vouch — clear pending and send thank you DM
       delete pending[message.author.id];
       writeJson("vouches.json", pending);
       try {
-        await message.author.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle("✅ Vouch Received!")
-            .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!")
-            .setTimestamp()
-          ],
-        });
+        await message.author.send({ embeds: [new EmbedBuilder().setColor(0x57f287).setTitle("✅ Vouch Received!")
+          .setDescription("Your vouch is done, thanks for vouching! 🙏\n\nYou're all good — enjoy your item!").setTimestamp()] });
       } catch { /* DMs closed */ }
       return;
     }
@@ -383,284 +453,175 @@ export function startBot(): void {
     //  USER COMMANDS
     // ══════════════════════════════════════════════════════
 
-    // &help
+    // $help — context sensitive
     if (cmd === "help") {
-      await message.channel.send({
-        embeds: [new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle("📦 Stock Bot — All Commands")
-          .addFields(
-            {
-              name: "👤 User Commands",
-              value: [
-                `\`${prefix}gen <stock>\` — Get an item from a stock`,
-                `\`${prefix}stock <stock>\` — See items left in a stock`,
-                `\`${prefix}stocklist\` — List all stocks`,
-                `\`${prefix}mystats\` — Your personal stats`,
-                `\`${prefix}checkstatus\` — Check status & get autorole`,
-                `\`${prefix}help\` — This message`,
-              ].join("\n"),
-            },
-            {
-              name: "📊 Gen Limits & Cooldowns",
-              value: [
-                `🚀 **Boost**   — 45 gens/day · 5 min cooldown`,
-                `⭐ **Premium** — 30 gens/day · 7 min cooldown`,
-                `👤 **Free**    — 20 gens/day · 10 min cooldown`,
-              ].join("\n"),
-            },
-            {
-              name: "⚠️ Vouch Miss Auto-Blacklist",
-              value: [
-                `Vouch within **3 min** after gen or get blacklisted:`,
-                `1st miss → 30 min · 2nd → 40 min`,
-                `3rd miss → 50 min · 4th → 60 min`,
-                `5th miss → **Permanent blacklist**`,
-              ].join("\n"),
-            },
-            {
-              name: "🔧 Admin Commands",
-              value: [
-                `\`${prefix}createstock <name>\``,
-                `\`${prefix}addstock <name> <item>\``,
-                `\`${prefix}addstocks <name>\` *(multi-line)*`,
-                `\`${prefix}removestock <name>\``,
-                `\`${prefix}clearstock <name>\``,
-                `\`${prefix}setprefix <prefix>\``,
-                `\`${prefix}setvouch #channel\``,
-                `\`${prefix}setlogchannel #channel\``,
-                `\`${prefix}setannouncechannel #channel\``,
-                `\`${prefix}setautorole <status> @role\``,
-                `\`${prefix}setgenchannel #channel\``,
-                `\`${prefix}setgenrole @role\``,
-                `\`${prefix}setboostrole @role\``,
-                `\`${prefix}setpremiumrole @role\``,
-                `\`${prefix}setlowstock <number>\``,
-                `\`${prefix}setminage <days>\``,
-                `\`${prefix}setvouchtimeout <minutes>\``,
-                `\`${prefix}resetcooldown @user\``,
-                `\`${prefix}resetmisses @user\``,
-                `\`${prefix}resetdaily @user\``,
-                `\`${prefix}vouchpending\``,
-                `\`${prefix}blacklist @user [temp <min>]\``,
-                `\`${prefix}unblacklist @user\``,
-                `\`${prefix}announce <message>\``,
-              ].join("\n"),
-            },
-          )
-          .setFooter({ text: `Prefix: ${prefix}` })
-        ],
-      });
+      const member = message.member!;
+      const userTier = getUserTier(member, cfg);
+      const admin = isAdmin(message);
+
+      const userFields: string[] = [
+        `\`${prefix}free <stock>\` — Gen from Free stocks 👤`,
+      ];
+      if (userTier === "premium" || userTier === "boost") {
+        userFields.push(`\`${prefix}premium <stock>\` — Gen from Premium stocks ⭐`);
+      }
+      if (userTier === "boost") {
+        userFields.push(`\`${prefix}boost <stock>\` — Gen from Boost stocks 🚀`);
+      }
+      userFields.push(
+        `\`${prefix}stocklist\` — View all stocks`,
+        `\`${prefix}mystats\` — Your stats`,
+        `\`${prefix}checkstatus\` — Check status & get role`,
+        `\`${prefix}help\` — This message`,
+      );
+
+      const embed = new EmbedBuilder().setColor(0x5865f2).setTitle("📦 Gen Bot — Commands")
+        .addFields({ name: "👤 Your Commands", value: userFields.join("\n") });
+
+      if (admin) {
+        embed.addFields(
+          {
+            name: "📊 Gen Limits",
+            value: [
+              `🚀 Boost   — 45 gens/day · 5 min cooldown`,
+              `⭐ Premium — 30 gens/day · 7 min cooldown`,
+              `👤 Free    — 20 gens/day · 10 min cooldown`,
+            ].join("\n"),
+          },
+          {
+            name: "🔧 Admin — Stocks",
+            value: [
+              `\`${prefix}createstock <free|premium|boost> <name>\``,
+              `\`${prefix}addstock <free|premium|boost> <name> <item>\``,
+              `\`${prefix}addstocks <free|premium|boost> <name>\` *(multi-line)*`,
+              `\`${prefix}removestock <free|premium|boost> <name>\``,
+              `\`${prefix}clearstock <free|premium|boost> <name>\``,
+            ].join("\n"),
+          },
+          {
+            name: "🔧 Admin — Config",
+            value: [
+              `\`${prefix}setprefix <prefix>\``,
+              `\`${prefix}setvouch #channel\``,
+              `\`${prefix}setlogchannel #channel\``,
+              `\`${prefix}setannouncechannel #channel\``,
+              `\`${prefix}setgenchannel #channel\``,
+              `\`${prefix}setautorole <status> @role\``,
+              `\`${prefix}setgenrole @role\``,
+              `\`${prefix}setboostrole @role\``,
+              `\`${prefix}setpremiumrole @role\``,
+              `\`${prefix}setlowstock <n>\``,
+              `\`${prefix}setminage <days>\``,
+              `\`${prefix}setvouchtimeout <min>\``,
+            ].join("\n"),
+          },
+          {
+            name: "🔧 Admin — Users",
+            value: [
+              `\`${prefix}resetcooldown @user\``,
+              `\`${prefix}resetmisses @user\``,
+              `\`${prefix}resetdaily @user\``,
+              `\`${prefix}vouchpending\``,
+              `\`${prefix}blacklist @user [temp <min>]\``,
+              `\`${prefix}unblacklist @user\``,
+              `\`${prefix}announce <msg>\``,
+            ].join("\n"),
+          },
+        );
+      } else {
+        embed.addFields({
+          name: "📊 Your Tier Limits",
+          value: (() => {
+            const { cooldownMs, dailyLimit, label, emoji } = TIER[userTier];
+            return `${emoji} **${label}** — ${dailyLimit} gens/day · ${cooldownMs / 60_000} min cooldown`;
+          })(),
+        });
+      }
+
+      embed.setFooter({ text: `Prefix: ${prefix}` });
+      await message.channel.send({ embeds: [embed] });
       return;
     }
 
-    // &mystats
+    // $mystats
     if (cmd === "mystats") {
       const member = message.member!;
-      const tier = getUserTier(member, cfg);
-      const { cooldownMs, dailyLimit, label, emoji } = TIER[tier];
+      const userTier = getUserTier(member, cfg);
+      const { cooldownMs, dailyLimit, label, emoji } = TIER[userTier];
       const daily = getDailyUsage();
       const today = todayStr();
       const usedToday = daily[message.author.id]?.date === today ? daily[message.author.id]!.count : 0;
-      const cooldowns = getCooldowns();
-      const lastGen = cooldowns[message.author.id];
+      const lastGen = getCooldowns()[message.author.id];
       const cooldownLeft = lastGen ? Math.max(0, cooldownMs - (Date.now() - lastGen)) : 0;
-      const misses = getMisses();
-      const missCount = misses[message.author.id] ?? 0;
+      const missCount = getMisses()[message.author.id] ?? 0;
       const { listed, entry } = checkBlacklist(message.author.id);
 
-      await message.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle(`📊 Stats — ${message.author.username}`)
-          .addFields(
-            { name: "Tier",       value: `${emoji} ${label}`,                                   inline: true },
-            { name: "Gens Today", value: `${usedToday} / ${dailyLimit}`,                        inline: true },
-            { name: "Cooldown",   value: cooldownLeft > 0 ? msToStr(cooldownLeft) : "Ready ✅", inline: true },
-            { name: "Vouch Misses", value: `${missCount}`,                                      inline: true },
-            {
-              name: "Blacklist",
-              value: listed
-                ? entry?.type === "perm"
-                  ? "🚫 Permanently blacklisted"
-                  : `⛔ Temp — expires <t:${Math.floor((entry?.until ?? 0) / 1000)}:R>`
-                : "✅ Clean",
-              inline: true,
-            },
-          )
-          .setThumbnail(message.author.displayAvatarURL())
-          .setTimestamp()
-        ],
-      });
+      await message.reply({ embeds: [new EmbedBuilder().setColor(0x5865f2)
+        .setTitle(`📊 Stats — ${message.author.username}`)
+        .addFields(
+          { name: "Tier",         value: `${emoji} ${label}`,                                   inline: true },
+          { name: "Gens Today",   value: `${usedToday} / ${dailyLimit}`,                        inline: true },
+          { name: "Cooldown",     value: cooldownLeft > 0 ? msToStr(cooldownLeft) : "Ready ✅", inline: true },
+          { name: "Vouch Misses", value: `${missCount}`,                                        inline: true },
+          { name: "Blacklist", inline: true,
+            value: listed
+              ? entry?.type === "perm" ? "🚫 Permanently blacklisted"
+              : `⛔ Temp — expires <t:${Math.floor((entry?.until ?? 0) / 1000)}:R>`
+              : "✅ Clean" },
+        )
+        .setThumbnail(message.author.displayAvatarURL()).setTimestamp()] });
       return;
     }
 
-    // &stocklist
+    // $stocklist
     if (cmd === "stocklist") {
       const stocks = getStocks();
-      const names = Object.keys(stocks);
-      if (names.length === 0)
-        return void message.reply("📦 No stocks have been created yet.");
-      const lines = names.map(n =>
-        `\`${n}\` — **${stocks[n]!.length}** item(s) ${stocks[n]!.length === 0 ? "*(out of stock)*" : ""}`
-      );
-      await message.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle("📦 All Stocks")
-          .setDescription(lines.join("\n"))
-          .setFooter({ text: `${names.length} stocks total` })
-        ],
-      });
-      return;
-    }
+      const embed = new EmbedBuilder().setColor(0x5865f2).setTitle("📦 All Stocks");
 
-    // &gen <name>
-    if (cmd === "gen") {
-      const name = args[0]?.toLowerCase();
-      if (!name) return void message.reply(`Usage: \`${prefix}gen <name>\``);
-
-      // Anti-alt: account age
-      if (cfg.minAccountAgeDays > 0) {
-        const accountAge = (Date.now() - message.author.createdTimestamp) / 86_400_000;
-        if (accountAge < cfg.minAccountAgeDays)
-          return void message.reply(
-            `❌ Your account must be at least **${cfg.minAccountAgeDays} day(s)** old to use \`${prefix}gen\`.\n` +
-            `Your account is **${Math.floor(accountAge)} day(s)** old.`
+      for (const tier of ["free", "premium", "boost"] as Tier[]) {
+        const { emoji, label } = TIER[tier];
+        const names = Object.keys(stocks[tier]);
+        if (names.length === 0) {
+          embed.addFields({ name: `${emoji} ${label} Stocks`, value: "*No stocks created*" });
+        } else {
+          const lines = names.map(n =>
+            `\`${n}\` — **${stocks[tier][n]!.length}** item(s)${stocks[tier][n]!.length === 0 ? " *(out of stock)*" : ""}`
           );
-      }
-
-      // Gen channel check
-      if (cfg.genChannelId && message.channelId !== cfg.genChannelId) {
-        return void message.reply(`❌ You can only use \`${prefix}gen\` in <#${cfg.genChannelId}>.`);
-      }
-
-      // Gen role check
-      if (cfg.genRoleId && !message.member!.roles.cache.has(cfg.genRoleId)) {
-        return void message.reply(`❌ You need the <@&${cfg.genRoleId}> role to use \`${prefix}gen\`.`);
-      }
-
-      const { listed } = checkBlacklist(message.author.id);
-      if (listed) return void message.reply("🚫 You are blacklisted and cannot use `gen`.");
-
-      const member = message.member!;
-      const tier = getUserTier(member, cfg);
-      const { cooldownMs, dailyLimit, label, emoji } = TIER[tier];
-
-      // Cooldown check
-      const cooldowns = getCooldowns();
-      const lastUsed = cooldowns[message.author.id];
-      if (lastUsed && Date.now() - lastUsed < cooldownMs) {
-        const left = cooldownMs - (Date.now() - lastUsed);
-        return void message.reply(
-          `⏳ Cooldown active! Please wait **${msToStr(left)}** before using \`${prefix}gen\` again.\n${emoji} ${label} cooldown: ${cooldownMs / 60_000} min`
-        );
-      }
-
-      // Daily limit
-      const daily = getDailyUsage();
-      const today = todayStr();
-      const todayCount = daily[message.author.id]?.date === today ? daily[message.author.id]!.count : 0;
-      if (todayCount >= dailyLimit)
-        return void message.reply(
-          `📵 You've hit your daily limit of **${dailyLimit} gens** (${emoji} ${label}). Come back tomorrow!`
-        );
-
-      // Stock
-      const stocks = getStocks();
-      if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
-      if (stocks[name]!.length === 0) return void message.reply(`❌ **${name}** is out of stock!`);
-
-      const item = stocks[name]!.shift()!;
-      const remaining = stocks[name]!.length;
-      writeJson("stocks.json", stocks);
-
-      cooldowns[message.author.id] = Date.now();
-      writeJson("cooldowns.json", cooldowns);
-
-      daily[message.author.id] = { date: today, count: todayCount + 1 };
-      writeJson("daily.json", daily);
-
-      // Global stats
-      const stats = getGenStats();
-      stats.total++;
-      stats.byStock[name] = (stats.byStock[name] ?? 0) + 1;
-      writeJson("genstats.json", stats);
-
-      const vouchLine = cfg.vouchChannelId
-        ? `\n\n✅ **Vouch here:** <#${cfg.vouchChannelId}>\n⚠️ **No vouch = auto-blacklist**`
-        : "";
-
-      try {
-        await message.author.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0x57f287)
-            .setTitle(`📦 Your item from: ${name}`)
-            .setDescription(`\`\`\`\n${item}\n\`\`\`${vouchLine}`)
-            .addFields({ name: "Your Tier", value: `${emoji} ${label} — ${todayCount + 1}/${dailyLimit} gens today`, inline: true })
-            .setFooter({ text: "Enjoy! Remember to vouch." })
-            .setTimestamp()
-          ],
-        });
-
-        await message.reply(
-          `✅ Check your DMs, ${message.author}! (**${todayCount + 1}/${dailyLimit}** gens used today)`
-        );
-
-        // Register pending vouch
-        if (cfg.vouchChannelId) {
-          const pending = getPending();
-          pending[message.author.id] = {
-            pendingSince: Date.now(),
-            warned: false,
-            stockName: name,
-            guildId: message.guild.id,
-            username: message.author.tag,
-          };
-          writeJson("vouches.json", pending);
+          embed.addFields({ name: `${emoji} ${label} Stocks`, value: lines.join("\n") });
         }
-
-        // Log gen
-        await logGen(client, message.author.id, message.author.tag, name, cfg, remaining);
-
-        // Low stock alert
-        await checkLowStock(client, name, remaining, cfg);
-
-      } catch {
-        // Refund
-        stocks[name]!.unshift(item);
-        writeJson("stocks.json", stocks);
-        delete cooldowns[message.author.id];
-        writeJson("cooldowns.json", cooldowns);
-        daily[message.author.id] = { date: today, count: todayCount };
-        writeJson("daily.json", daily);
-        stats.total--;
-        stats.byStock[name] = Math.max(0, (stats.byStock[name] ?? 1) - 1);
-        writeJson("genstats.json", stats);
-        await message.reply(`❌ Could not DM you. Please open your DMs and try again.`);
       }
+
+      await message.reply({ embeds: [embed] });
       return;
     }
 
-    // &stock <name>
-    if (cmd === "stock") {
+    // $free <stock>
+    if (cmd === "free") {
       const name = args[0]?.toLowerCase();
-      if (!name) return void message.reply(`Usage: \`${prefix}stock <name>\``);
-      const stocks = getStocks();
-      if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
-      const count = stocks[name]!.length;
-      await message.reply(
-        count === 0
-          ? `📦 **${name}** is currently **out of stock**.`
-          : `📦 **${name}** has **${count}** item(s) available.`
-      );
+      if (!name) return void message.reply(`Usage: \`${prefix}free <stock>\``);
+      await handleGen(message, client, "free", name, cfg);
       return;
     }
 
-    // &checkstatus
+    // $premium <stock>
+    if (cmd === "premium") {
+      const name = args[0]?.toLowerCase();
+      if (!name) return void message.reply(`Usage: \`${prefix}premium <stock>\``);
+      await handleGen(message, client, "premium", name, cfg);
+      return;
+    }
+
+    // $boost <stock>
+    if (cmd === "boost") {
+      const name = args[0]?.toLowerCase();
+      if (!name) return void message.reply(`Usage: \`${prefix}boost <stock>\``);
+      await handleGen(message, client, "boost", name, cfg);
+      return;
+    }
+
+    // $checkstatus
     if (cmd === "checkstatus") {
-      if (!cfg.autorole)
-        return void message.reply(`❌ No autorole configured. Ask an admin to use \`${prefix}setautorole\`.`);
+      if (!cfg.autorole) return void message.reply(`❌ No autorole configured.`);
       const { statusText, roleId } = cfg.autorole;
       const member = message.member!;
       const activity = member.presence?.activities.find(a => a.type === ActivityType.Custom);
@@ -671,15 +632,13 @@ export function startBot(): void {
         } else {
           try {
             await member.roles.add(roleId);
-            await message.reply("✅ Your status is correct! You have been given the role.");
+            await message.reply("✅ Status correct! You have been given the role.");
           } catch {
-            await message.reply("❌ Could not assign the role. Check bot permissions and role order.");
+            await message.reply("❌ Could not assign the role. Check bot permissions.");
           }
         }
       } else {
-        await message.reply(
-          `❌ Your current status is not correct.\n\nRequired text: **"${statusText}"**\n\nSet your Discord status to that text, then try \`${prefix}checkstatus\` again.`
-        );
+        await message.reply(`❌ Status incorrect.\n\nRequired: **"${statusText}"**\n\nSet that as your Discord status then run \`${prefix}checkstatus\` again.`);
       }
       return;
     }
@@ -690,126 +649,122 @@ export function startBot(): void {
 
     if (!isAdmin(message)) return;
 
-    // &createstock <name>
+    function parseTier(val: string | undefined): Tier | null {
+      if (val === "free" || val === "premium" || val === "boost") return val;
+      return null;
+    }
+
+    // $createstock <tier> <name>
     if (cmd === "createstock") {
-      const name = args[0]?.toLowerCase();
-      if (!name) return void message.reply(`Usage: \`${prefix}createstock <name>\``);
+      const tier = parseTier(args[0]);
+      const name = args[1]?.toLowerCase();
+      if (!tier || !name) return void message.reply(`Usage: \`${prefix}createstock <free|premium|boost> <name>\``);
       const stocks = getStocks();
-      if (stocks[name]) return void message.reply(`❌ Stock \`${name}\` already exists.`);
-      stocks[name] = [];
+      if (stocks[tier][name]) return void message.reply(`❌ \`${name}\` already exists in **${tier}**.`);
+      stocks[tier][name] = [];
       writeJson("stocks.json", stocks);
-      await message.reply(`✅ Stock \`${name}\` created!`);
+      await message.reply(`✅ Stock \`${name}\` created in **${tier}** tier!`);
       return;
     }
 
-    // &addstock <name> <item>
+    // $addstock <tier> <name> <item>
     if (cmd === "addstock") {
-      const name = args[0]?.toLowerCase();
-      const item = args.slice(1).join(" ");
-      if (!name || !item) return void message.reply(`Usage: \`${prefix}addstock <name> <item>\``);
+      const tier = parseTier(args[0]);
+      const name = args[1]?.toLowerCase();
+      const item = args.slice(2).join(" ");
+      if (!tier || !name || !item) return void message.reply(`Usage: \`${prefix}addstock <free|premium|boost> <name> <item>\``);
       const stocks = getStocks();
-      if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
-      stocks[name]!.push(item);
+      if (!stocks[tier][name]) return void message.reply(`❌ \`${name}\` does not exist in **${tier}**.`);
+      stocks[tier][name]!.push(item);
       writeJson("stocks.json", stocks);
-      await message.reply(`✅ Item added to \`${name}\`! Now has **${stocks[name]!.length}** item(s).`);
+      await message.reply(`✅ Item added to \`${name}\` [${tier}]! Now has **${stocks[tier][name]!.length}** item(s).`);
       return;
     }
 
-    // &addstocks <name>  (each line after first line = one item)
+    // $addstocks <tier> <name>  (each line = one item)
     if (cmd === "addstocks") {
-      const name = args[0]?.toLowerCase();
-      if (!name) return void message.reply(`Usage: \`${prefix}addstocks <name>\` then paste items (one per line)`);
+      const tier = parseTier(args[0]);
+      const name = args[1]?.toLowerCase();
+      if (!tier || !name) return void message.reply(`Usage: \`${prefix}addstocks <free|premium|boost> <name>\` then items (one per line)`);
       const stocks = getStocks();
-      if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
+      if (!stocks[tier][name]) return void message.reply(`❌ \`${name}\` does not exist in **${tier}**.`);
       const lines = message.content
-        .slice((prefix + "addstocks " + name).length)
-        .split("\n")
-        .map(l => l.trim())
-        .filter(Boolean);
+        .slice((prefix + "addstocks " + args[0] + " " + name).length)
+        .split("\n").map(l => l.trim()).filter(Boolean);
       if (lines.length === 0) return void message.reply("❌ No items found. Put each item on a new line.");
-      stocks[name]!.push(...lines);
+      stocks[tier][name]!.push(...lines);
       writeJson("stocks.json", stocks);
-      await message.reply(`✅ Added **${lines.length}** item(s) to \`${name}\`! Now has **${stocks[name]!.length}** item(s).`);
+      await message.reply(`✅ Added **${lines.length}** item(s) to \`${name}\` [${tier}]! Now has **${stocks[tier][name]!.length}** item(s).`);
       return;
     }
 
-    // &removestock <name>
+    // $removestock <tier> <name>
     if (cmd === "removestock") {
-      const name = args[0]?.toLowerCase();
-      if (!name) return void message.reply(`Usage: \`${prefix}removestock <name>\``);
+      const tier = parseTier(args[0]);
+      const name = args[1]?.toLowerCase();
+      if (!tier || !name) return void message.reply(`Usage: \`${prefix}removestock <free|premium|boost> <name>\``);
       const stocks = getStocks();
-      if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
-      delete stocks[name];
+      if (!stocks[tier][name]) return void message.reply(`❌ \`${name}\` does not exist in **${tier}**.`);
+      delete stocks[tier][name];
       writeJson("stocks.json", stocks);
-      await message.reply(`✅ Stock \`${name}\` has been deleted.`);
+      await message.reply(`✅ Stock \`${name}\` [${tier}] deleted.`);
       return;
     }
 
-    // &clearstock <name>
+    // $clearstock <tier> <name>
     if (cmd === "clearstock") {
-      const name = args[0]?.toLowerCase();
-      if (!name) return void message.reply(`Usage: \`${prefix}clearstock <name>\``);
+      const tier = parseTier(args[0]);
+      const name = args[1]?.toLowerCase();
+      if (!tier || !name) return void message.reply(`Usage: \`${prefix}clearstock <free|premium|boost> <name>\``);
       const stocks = getStocks();
-      if (!stocks[name]) return void message.reply(`❌ Stock \`${name}\` does not exist.`);
-      stocks[name] = [];
+      if (!stocks[tier][name]) return void message.reply(`❌ \`${name}\` does not exist in **${tier}**.`);
+      stocks[tier][name] = [];
       writeJson("stocks.json", stocks);
-      await message.reply(`✅ Stock \`${name}\` has been cleared (0 items).`);
+      await message.reply(`✅ Stock \`${name}\` [${tier}] cleared.`);
       return;
     }
 
-    // &resetcooldown @user
+    // $resetcooldown @user
     if (cmd === "resetcooldown") {
       const target = message.mentions.users.first();
       if (!target) return void message.reply(`Usage: \`${prefix}resetcooldown @user\``);
-      const cooldowns = getCooldowns();
-      delete cooldowns[target.id];
-      writeJson("cooldowns.json", cooldowns);
+      const c = getCooldowns(); delete c[target.id]; writeJson("cooldowns.json", c);
       await message.reply(`✅ Cooldown reset for **${target.tag}**.`);
       return;
     }
 
-    // &resetmisses @user
+    // $resetmisses @user
     if (cmd === "resetmisses") {
       const target = message.mentions.users.first();
       if (!target) return void message.reply(`Usage: \`${prefix}resetmisses @user\``);
-      const misses = getMisses();
-      delete misses[target.id];
-      writeJson("misses.json", misses);
-      await message.reply(`✅ Vouch miss count reset for **${target.tag}**.`);
+      const m = getMisses(); delete m[target.id]; writeJson("misses.json", m);
+      await message.reply(`✅ Miss count reset for **${target.tag}**.`);
       return;
     }
 
-    // &resetdaily @user
+    // $resetdaily @user
     if (cmd === "resetdaily") {
       const target = message.mentions.users.first();
       if (!target) return void message.reply(`Usage: \`${prefix}resetdaily @user\``);
-      const daily = getDailyUsage();
-      delete daily[target.id];
-      writeJson("daily.json", daily);
+      const d = getDailyUsage(); delete d[target.id]; writeJson("daily.json", d);
       await message.reply(`✅ Daily gen count reset for **${target.tag}**.`);
       return;
     }
 
-    // &vouchpending
+    // $vouchpending
     if (cmd === "vouchpending") {
       const pending = getPending();
       const entries = Object.entries(pending);
-      if (entries.length === 0) return void message.reply("✅ No users have a pending vouch right now.");
+      if (entries.length === 0) return void message.reply("✅ No pending vouches.");
       const lines = entries.map(([uid, d]) => {
         const age = Math.floor((Date.now() - d.pendingSince) / 60_000);
-        return `<@${uid}> — **${d.stockName}** — ${age} min ago${d.warned ? " ⚠️ warned" : ""}`;
+        return `<@${uid}> — **${d.stockName}** [${d.tier}] — ${age} min ago${d.warned ? " ⚠️" : ""}`;
       });
-      await message.reply({
-        embeds: [new EmbedBuilder()
-          .setColor(0xfee75c)
-          .setTitle(`⏳ Pending Vouches (${entries.length})`)
-          .setDescription(lines.join("\n"))
-        ],
-      });
+      await message.reply({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle(`⏳ Pending Vouches (${entries.length})`).setDescription(lines.join("\n"))] });
       return;
     }
 
-    // &blacklist @user [temp <minutes>]
+    // $blacklist @user [temp <min>]
     if (cmd === "blacklist") {
       const target = message.mentions.users.first();
       if (!target) return void message.reply(`Usage: \`${prefix}blacklist @user [temp <minutes>]\``);
@@ -828,7 +783,7 @@ export function startBot(): void {
       return;
     }
 
-    // &unblacklist @user
+    // $unblacklist @user
     if (cmd === "unblacklist") {
       const target = message.mentions.users.first();
       if (!target) return void message.reply(`Usage: \`${prefix}unblacklist @user\``);
@@ -841,16 +796,16 @@ export function startBot(): void {
       return;
     }
 
-    // &setprefix <prefix>
+    // $setprefix
     if (cmd === "setprefix") {
       const np = args[0];
-      if (!np) return void message.reply(`Usage: \`${prefix}setprefix <new_prefix>\``);
+      if (!np) return void message.reply(`Usage: \`${prefix}setprefix <new>\``);
       const c = getConfig(); c.prefix = np; writeJson("config.json", c);
       await message.reply(`✅ Prefix changed to \`${np}\``);
       return;
     }
 
-    // &setvouch #channel
+    // $setvouch #channel
     if (cmd === "setvouch") {
       const ch = message.mentions.channels.first();
       if (!ch) return void message.reply(`Usage: \`${prefix}setvouch #channel\``);
@@ -859,16 +814,16 @@ export function startBot(): void {
       return;
     }
 
-    // &setlogchannel #channel
+    // $setlogchannel
     if (cmd === "setlogchannel") {
       const ch = message.mentions.channels.first();
       if (!ch) return void message.reply(`Usage: \`${prefix}setlogchannel #channel\``);
       const c = getConfig(); c.logChannelId = ch.id; writeJson("config.json", c);
-      await message.reply(`✅ Log channel set to ${ch}\nAll gens, low stock alerts, and auto-blacklists will be logged there.`);
+      await message.reply(`✅ Log channel set to ${ch}`);
       return;
     }
 
-    // &setannouncechannel #channel
+    // $setannouncechannel
     if (cmd === "setannouncechannel") {
       const ch = message.mentions.channels.first();
       if (!ch) return void message.reply(`Usage: \`${prefix}setannouncechannel #channel\``);
@@ -877,20 +832,44 @@ export function startBot(): void {
       return;
     }
 
-    // &setautorole <status text> @role
+    // $setgenchannel
+    if (cmd === "setgenchannel") {
+      const ch = message.mentions.channels.first();
+      if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
+        const c = getConfig(); c.genChannelId = null; writeJson("config.json", c);
+        await message.reply(`✅ Gen channel restriction removed.`); return;
+      }
+      if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`remove\` to disable`);
+      const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
+      await message.reply(`✅ Gen channel set to ${ch}`);
+      return;
+    }
+
+    // $setautorole <status> @role
     if (cmd === "setautorole") {
       const role = message.mentions.roles.first();
       if (!role) return void message.reply(`Usage: \`${prefix}setautorole <status text> @role\``);
-      const statusText = message.content
-        .slice((prefix + "setautorole").length)
-        .replace(`<@&${role.id}>`, "").trim();
+      const statusText = message.content.slice((prefix + "setautorole").length).replace(`<@&${role.id}>`, "").trim();
       if (!statusText) return void message.reply(`Usage: \`${prefix}setautorole <status text> @role\``);
       const c = getConfig(); c.autorole = { statusText, roleId: role.id }; writeJson("config.json", c);
       await message.reply(`✅ Autorole set! Status: **"${statusText}"** → ${role}`);
       return;
     }
 
-    // &setboostrole @role
+    // $setgenrole
+    if (cmd === "setgenrole") {
+      const role = message.mentions.roles.first();
+      if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
+        const c = getConfig(); c.genRoleId = null; writeJson("config.json", c);
+        await message.reply(`✅ Gen role restriction removed.`); return;
+      }
+      if (!role) return void message.reply(`Usage: \`${prefix}setgenrole @role\` | \`remove\` to disable`);
+      const c = getConfig(); c.genRoleId = role.id; writeJson("config.json", c);
+      await message.reply(`✅ Gen role set to ${role}`);
+      return;
+    }
+
+    // $setboostrole
     if (cmd === "setboostrole") {
       const role = message.mentions.roles.first();
       if (!role) return void message.reply(`Usage: \`${prefix}setboostrole @role\``);
@@ -899,7 +878,7 @@ export function startBot(): void {
       return;
     }
 
-    // &setpremiumrole @role
+    // $setpremiumrole
     if (cmd === "setpremiumrole") {
       const role = message.mentions.roles.first();
       if (!role) return void message.reply(`Usage: \`${prefix}setpremiumrole @role\``);
@@ -908,83 +887,44 @@ export function startBot(): void {
       return;
     }
 
-    // &setgenchannel #channel
-    if (cmd === "setgenchannel") {
-      const ch = message.mentions.channels.first();
-      if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
-        const c = getConfig(); c.genChannelId = null; writeJson("config.json", c);
-        await message.reply(`✅ Gen channel restriction removed. \`${prefix}gen\` can be used anywhere.`);
-        return;
-      }
-      if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`${prefix}setgenchannel remove\` to disable`);
-      const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
-      await message.reply(`✅ Gen channel set to ${ch}! \`${prefix}gen\` will only work in that channel.`);
-      return;
-    }
-
-    // &setgenrole @role
-    if (cmd === "setgenrole") {
-      const role = message.mentions.roles.first();
-      if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
-        const c = getConfig(); c.genRoleId = null; writeJson("config.json", c);
-        await message.reply(`✅ Gen role restriction removed. Anyone can now use \`${prefix}gen\`.`);
-        return;
-      }
-      if (!role) return void message.reply(`Usage: \`${prefix}setgenrole @role\` | \`${prefix}setgenrole remove\` to disable`);
-      const c = getConfig(); c.genRoleId = role.id; writeJson("config.json", c);
-      await message.reply(`✅ Gen role set to ${role}! Only members with this role can use \`${prefix}gen\`.`);
-      return;
-    }
-
-    // &setlowstock <number>
+    // $setlowstock
     if (cmd === "setlowstock") {
       const n = parseInt(args[0] ?? "", 10);
       if (isNaN(n) || n < 1) return void message.reply(`Usage: \`${prefix}setlowstock <number>\``);
       const c = getConfig(); c.lowStockThreshold = n; writeJson("config.json", c);
-      await message.reply(`✅ Low stock alert will trigger when a stock has ≤ **${n}** item(s).`);
+      await message.reply(`✅ Low stock alert at ≤ **${n}** item(s).`);
       return;
     }
 
-    // &setminage <days>
+    // $setminage
     if (cmd === "setminage") {
       const n = parseInt(args[0] ?? "", 10);
       if (isNaN(n) || n < 0) return void message.reply(`Usage: \`${prefix}setminage <days>\` (0 to disable)`);
       const c = getConfig(); c.minAccountAgeDays = n; writeJson("config.json", c);
-      await message.reply(n === 0 ? `✅ Account age check disabled.` : `✅ Minimum account age set to **${n} day(s)**.`);
+      await message.reply(n === 0 ? `✅ Account age check disabled.` : `✅ Min account age set to **${n} day(s)**.`);
       return;
     }
 
-    // &setvouchtimeout <minutes>
+    // $setvouchtimeout
     if (cmd === "setvouchtimeout") {
       const n = parseInt(args[0] ?? "", 10);
       if (isNaN(n) || n < 1) return void message.reply(`Usage: \`${prefix}setvouchtimeout <minutes>\``);
       const c = getConfig(); c.vouchTimeoutMinutes = n; writeJson("config.json", c);
-      await message.reply(`✅ Vouch timeout set to **${n} minutes**. Users who don't vouch within that time will be auto-blacklisted.`);
+      await message.reply(`✅ Vouch timeout set to **${n} minutes**.`);
       return;
     }
 
-    // &announce <message>
+    // $announce
     if (cmd === "announce") {
-      if (!cfg.announceChannelId)
-        return void message.reply(`❌ No announce channel set. Use \`${prefix}setannouncechannel #channel\` first.`);
+      if (!cfg.announceChannelId) return void message.reply(`❌ Set announce channel first: \`${prefix}setannouncechannel #channel\``);
       const text = message.content.slice((prefix + "announce").length).trim();
       if (!text) return void message.reply(`Usage: \`${prefix}announce <message>\``);
       try {
         const ch = message.guild.channels.cache.get(cfg.announceChannelId);
-        if (!ch?.isTextBased()) return void message.reply("❌ Announce channel not found or not a text channel.");
-        await ch.send({
-          embeds: [new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle("📢 Announcement")
-            .setDescription(text)
-            .setFooter({ text: `From ${message.author.tag}` })
-            .setTimestamp()
-          ],
-        });
+        if (!ch?.isTextBased()) return void message.reply("❌ Announce channel not found.");
+        await ch.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle("📢 Announcement").setDescription(text).setFooter({ text: `From ${message.author.tag}` }).setTimestamp()] });
         await message.reply("✅ Announcement sent!");
-      } catch {
-        await message.reply("❌ Failed to send announcement. Check bot permissions.");
-      }
+      } catch { await message.reply("❌ Failed to send."); }
       return;
     }
   });
