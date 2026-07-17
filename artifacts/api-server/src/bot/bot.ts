@@ -225,8 +225,15 @@ async function handleGen(
   const prefix = cfg.prefix;
 
   // Tier access check
-  const tierOrder: Tier[] = ["free", "premium", "boost"];
-  if (tierOrder.indexOf(userTier) < tierOrder.indexOf(stockTier)) {
+  // Boost: can use free + boost (NOT premium)
+  // Premium: can use free + premium (NOT boost)
+  // Free: can use free only
+  const allowed: Record<Tier, Tier[]> = {
+    free:    ["free"],
+    premium: ["free", "premium"],
+    boost:   ["free", "boost"],
+  };
+  if (!allowed[userTier].includes(stockTier)) {
     const needed = stockTier === "premium" ? "Premium ⭐" : "Boost 🚀";
     return void message.reply(`❌ You need the **${needed}** role to use \`${prefix}${stockTier}\`.`);
   }
@@ -462,7 +469,7 @@ export function startBot(): void {
       const userFields: string[] = [
         `\`${prefix}free <stock>\` — Gen from Free stocks 👤`,
       ];
-      if (userTier === "premium" || userTier === "boost") {
+      if (userTier === "premium") {
         userFields.push(`\`${prefix}premium <stock>\` — Gen from Premium stocks ⭐`);
       }
       if (userTier === "boost") {
