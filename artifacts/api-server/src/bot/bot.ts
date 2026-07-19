@@ -31,6 +31,7 @@ interface Config {
   lowStockThreshold: number;
   minAccountAgeDays: number;
   vouchTimeoutMinutes: number;
+  allowedGuildIds: string[];
 }
 
 interface BlacklistEntry { id: string; type: "temp" | "perm"; until?: number }
@@ -80,11 +81,17 @@ function writeJson(file: string, data: unknown) {
 
 const DEFAULT_STOCKS: TieredStocks = { free: {}, premium: {}, boost: {} };
 
-const getConfig = (): Config => readJson<Config>("config.json", {
-  prefix: "&", vouchChannelId: null, logChannelId: null, announceChannelId: null,
-  genChannelId: null, autorole: null, boostRoleId: null, premiumRoleId: null,
-  genRoleId: null, lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
-});
+const getConfig = (): Config => {
+  const def: Config = {
+    prefix: "&", vouchChannelId: null, logChannelId: null, announceChannelId: null,
+    genChannelId: null, autorole: null, boostRoleId: null, premiumRoleId: null,
+    genRoleId: null, lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
+    allowedGuildIds: [],
+  };
+  const cfg = readJson<Config>("config.json", def);
+  if (!cfg.allowedGuildIds) cfg.allowedGuildIds = [];
+  return cfg;
+};
 
 function getStocks(): TieredStocks {
   const raw = readJson<unknown>("stocks.json", DEFAULT_STOCKS);
@@ -359,6 +366,15 @@ export function startBot(): void {
 
   client.once("clientReady", () => logger.info(`Bot logged in as ${client.user?.tag}`));
 
+  // ── Auto-leave unauthorized servers ──────────────────────────────────────
+  client.on("guildCreate", async (guild) => {
+    const cfg = getConfig();
+    if (cfg.allowedGuildIds.length > 0 && !cfg.allowedGuildIds.includes(guild.id)) {
+      logger.info(`Unauthorized server joined: ${guild.name} (${guild.id}) — leaving.`);
+      await guild.leave();
+    }
+  });
+
   // ── Status role auto-remove ───────────────────────────────────────────────
   client.on("presenceUpdate", async (_old, newPresence) => {
     try {
@@ -418,6 +434,9 @@ export function startBot(): void {
   client.on("messageCreate", async (message) => {
     if (message.author.bot) return;
     const cfg = getConfig();
+
+    // ── Guild whitelist check ─────────────────────────────────────────────
+    if (message.guild && cfg.allowedGuildIds.length > 0 && !cfg.allowedGuildIds.includes(message.guild.id)) return;
 
     // ── Vouch channel: strict validation ─────────────────────────────────
     if (cfg.vouchChannelId && message.channelId === cfg.vouchChannelId && message.guild) {
@@ -521,6 +540,8 @@ export function startBot(): void {
               `\`${prefix}setlowstock <n>\``,
               `\`${prefix}setminage <days>\``,
               `\`${prefix}setvouchtimeout <min>\``,
+              `\`${prefix}allowguild <guildId>\``,
+              `\`${prefix}denyguild <guildId>\``,
             ].join("\n"),
           },
           {
@@ -850,6 +871,29 @@ export function startBot(): void {
       if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`remove\` to disable`);
       const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
       await message.reply(`✅ Gen channel set to ${ch}`);
+      return;
+    }
+
+    // $allowguild <guildId>
+    if (cmd === "allowguild") {
+      const guildId = args[0];
+      if (!guildId) return void message.reply(`Usage: \`${prefix}allowguild <guildId>\`\nCurrent server ID: \`${message.guild?.id}\``);
+      const c = getConfig();
+      if (c.allowedGuildIds.includes(guildId)) return void message.reply(`✅ \`${guildId}\` already allowed.`);
+      c.allowedGuildIds.push(guildId);
+      writeJson("config.json", c);
+      await message.reply(`✅ Server \`${guildId}\` added to whitelist.`);
+      return;
+    }
+
+    // $denyguild <guildId>
+    if (cmd === "denyguild") {
+      const guildId = args[0];
+      if (!guildId) return void message.reply(`Usage: \`${prefix}denyguild <guildId>\``);
+      const c = getConfig();
+      c.allowedGuildIds = c.allowedGuildIds.filter(id => id !== guildId);
+      writeJson("config.json", c);
+      await message.reply(`✅ Server \`${guildId}\` removed from whitelist.`);
       return;
     }
 
