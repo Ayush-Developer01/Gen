@@ -32,6 +32,7 @@ interface Config {
   minAccountAgeDays: number;
   vouchTimeoutMinutes: number;
   allowedGuildIds: string[];
+  ownerId: string | null;
 }
 
 interface BlacklistEntry { id: string; type: "temp" | "perm"; until?: number }
@@ -87,6 +88,7 @@ const getConfig = (): Config => {
     genChannelId: null, autorole: null, boostRoleId: null, premiumRoleId: null,
     genRoleId: null, lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
     allowedGuildIds: [],
+    ownerId: null,
   };
   const cfg = readJson<Config>("config.json", def);
   if (!cfg.allowedGuildIds) cfg.allowedGuildIds = [];
@@ -435,8 +437,9 @@ export function startBot(): void {
     if (message.author.bot) return;
     const cfg = getConfig();
 
-    // ── Guild whitelist check ─────────────────────────────────────────────
-    if (message.guild && cfg.allowedGuildIds.length > 0 && !cfg.allowedGuildIds.includes(message.guild.id)) return;
+    // ── Guild whitelist check (owner bypasses) ───────────────────────────
+    const isOwner = cfg.ownerId ? message.author.id === cfg.ownerId : false;
+    if (!isOwner && message.guild && cfg.allowedGuildIds.length > 0 && !cfg.allowedGuildIds.includes(message.guild.id)) return;
 
     // ── Vouch channel: strict validation ─────────────────────────────────
     if (cfg.vouchChannelId && message.channelId === cfg.vouchChannelId && message.guild) {
@@ -871,6 +874,17 @@ export function startBot(): void {
       if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`remove\` to disable`);
       const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
       await message.reply(`✅ Gen channel set to ${ch}`);
+      return;
+    }
+
+    // $setowner — set bot owner (only usable if no owner set, or by owner)
+    if (cmd === "setowner") {
+      const c = getConfig();
+      if (c.ownerId && c.ownerId !== message.author.id)
+        return void message.reply(`❌ Owner already set.`);
+      c.ownerId = message.author.id;
+      writeJson("config.json", c);
+      await message.reply(`✅ You are now the bot owner! Your ID: \`${message.author.id}\``);
       return;
     }
 
