@@ -33,6 +33,7 @@ interface Config {
   vouchTimeoutMinutes: number;
   allowedGuildIds: string[];
   ownerId: string | null;
+  emojis: Record<string, string>;
 }
 
 interface BlacklistEntry { id: string; type: "temp" | "perm"; until?: number }
@@ -89,11 +90,20 @@ const getConfig = (): Config => {
     genRoleId: null, lowStockThreshold: 5, minAccountAgeDays: 0, vouchTimeoutMinutes: 3,
     allowedGuildIds: [],
     ownerId: null,
+    emojis: {
+      success: "✅", error: "❌", stock: "📦", free: "👤",
+      premium: "⭐", boost: "🚀", vouch: "💬", blacklist: "🚫",
+    },
   };
   const cfg = readJson<Config>("config.json", def);
   if (!cfg.allowedGuildIds) cfg.allowedGuildIds = [];
+  if (!cfg.emojis) cfg.emojis = def.emojis;
   return cfg;
 };
+
+function emoji(cfg: Config, key: string, fallback: string): string {
+  return cfg.emojis?.[key] || fallback;
+}
 
 function getStocks(): TieredStocks {
   const raw = readJson<unknown>("stocks.json", DEFAULT_STOCKS);
@@ -505,7 +515,7 @@ export function startBot(): void {
         `\`${prefix}help\` — This message`,
       );
 
-      const embed = new EmbedBuilder().setColor(0x5865f2).setTitle("📦 Gen Bot — Commands")
+      const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(`${emoji(cfg, "stock", "📦")} Gen Bot — Commands`)
         .addFields({ name: "👤 Your Commands", value: userFields.join("\n") });
 
       if (admin) {
@@ -543,6 +553,8 @@ export function startBot(): void {
               `\`${prefix}setlowstock <n>\``,
               `\`${prefix}setminage <days>\``,
               `\`${prefix}setvouchtimeout <min>\``,
+              `\`${prefix}setemoji <key> <emoji>\``,
+              `\`${prefix}removeemoji <key>\``,
               `\`${prefix}allowguild <guildId>\``,
               `\`${prefix}denyguild <guildId>\``,
             ].join("\n"),
@@ -874,6 +886,36 @@ export function startBot(): void {
       if (!ch) return void message.reply(`Usage: \`${prefix}setgenchannel #channel\` | \`remove\` to disable`);
       const c = getConfig(); c.genChannelId = ch.id; writeJson("config.json", c);
       await message.reply(`✅ Gen channel set to ${ch}`);
+      return;
+    }
+
+    // $setemoji <key> <emoji> — customize bot emojis
+    if (cmd === "setemoji") {
+      const key = args[0]?.toLowerCase();
+      const value = args.slice(1).join(" ").trim();
+      const validKeys = ["success", "error", "stock", "free", "premium", "boost", "vouch", "blacklist"];
+      if (!key || !value || !validKeys.includes(key)) {
+        return void message.reply(`Usage: \`${prefix}setemoji <${validKeys.join("|")}> <emoji>\`\nExample: \`${prefix}setemoji success ✅\``);
+      }
+      const c = getConfig();
+      c.emojis[key] = value;
+      writeJson("config.json", c);
+      await message.reply(`✅ Emoji set: **${key}** → ${value}`);
+      return;
+    }
+
+    // $removeemoji <key>
+    if (cmd === "removeemoji") {
+      const key = args[0]?.toLowerCase();
+      const defaults: Record<string, string> = {
+        success: "✅", error: "❌", stock: "📦", free: "👤",
+        premium: "⭐", boost: "🚀", vouch: "💬", blacklist: "🚫",
+      };
+      if (!key || !defaults[key]) return void message.reply(`Usage: \`${prefix}removeemoji <key>\``);
+      const c = getConfig();
+      c.emojis[key] = defaults[key];
+      writeJson("config.json", c);
+      await message.reply(`✅ Default emoji restored for **${key}**.`);
       return;
     }
 
