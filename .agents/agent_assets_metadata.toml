@@ -5,5 +5,5 @@ generated = []
 id = "hfbk4PvheYrH31YTw2YhU"
 uri = "file://exports/gen-bot-minimal.zip"
 type = "unspecified"
-title = "Gen Bot Minimal ZIP"
-description = "Compact deploy-ready Discord bot package with only 4 required files: bot.js, package.json, Dockerfile, and README.md."
+title = "Gen Bot Minimal ZIP (Corrected)"
+description = "Complete compiled bot in a compact 4-file package. npm start and Docker startup paths are both fixed."
