@@ -39,6 +39,7 @@ interface Config {
   allowedGuildIds: string[];
   ownerId: string | null;
   emojis: Record<string, string>;
+  aliases: Record<string, string>;
 }
 
 interface BlacklistEntry { id: string; type: "temp" | "perm"; until?: number }
@@ -98,10 +99,12 @@ const getConfig = (): Config => {
       success: "✅", error: "❌", stock: "📦", free: "👤",
       premium: "⭐", boost: "🚀", vouch: "💬", blacklist: "🚫",
     },
+    aliases: {},
   };
   const cfg = readJson<Config>("config.json", def);
   if (!cfg.allowedGuildIds) cfg.allowedGuildIds = [];
   if (!cfg.emojis) cfg.emojis = def.emojis;
+  if (!cfg.aliases) cfg.aliases = {};
   return cfg;
 };
 
@@ -477,9 +480,16 @@ client.on("messageCreate", async (message) => {
   if (!message.content.startsWith(prefix)) return;
 
   const parts = message.content.slice(prefix.length).trim().split(/\s+/);
-  const cmd = parts.shift()?.toLowerCase();
+  let cmd = parts.shift()?.toLowerCase();
   if (!cmd) return;
   const args = parts;
+
+  // Resolve admin-defined aliases while preserving all command arguments.
+  const seenAliases = new Set<string>();
+  while (cmd && cfg.aliases[cmd] && !seenAliases.has(cmd) && seenAliases.size < 10) {
+    seenAliases.add(cmd);
+    cmd = cfg.aliases[cmd]!.toLowerCase();
+  }
 
   // ══════════════════════════════════════════════════════
   //  USER COMMANDS
@@ -532,6 +542,9 @@ client.on("messageCreate", async (message) => {
           `\`${prefix}removeemoji <key>\``,
           `\`${prefix}allowguild <guildId>\``,
           `\`${prefix}denyguild <guildId>\``,
+          `\`${prefix}setalias <command> <alias>\``,
+          `\`${prefix}removealias <alias>\``,
+          `\`${prefix}aliases\``,
         ].join("\n") },
         { name: "🔧 Admin — Users", value: [
           `\`${prefix}resetcooldown @user\``,
@@ -650,6 +663,49 @@ client.on("messageCreate", async (message) => {
   function parseTier(val: string | undefined): Tier | null {
     if (val === "free" || val === "premium" || val === "boost") return val;
     return null;
+  }
+
+  if (cmd === "setalias") {
+    const target = args[0]?.toLowerCase();
+    const alias = args[1]?.toLowerCase();
+    const valid = (value: string | undefined) => !!value && /^[a-z0-9_-]+$/.test(value);
+    if (!valid(target) || !valid(alias)) {
+      return void message.reply(`Usage: \`${prefix}setalias <command> <alias>\`\nExample: \`${prefix}setalias createstock cs\``);
+    }
+    if (alias === target || ["setalias", "removealias", "aliases"].includes(alias)) {
+      return void message.reply(`❌ This alias cannot be used.`);
+    }
+    const c = getConfig();
+    const aliases = { ...c.aliases, [alias]: target };
+    let check = target;
+    const seen = new Set<string>();
+    while (aliases[check] && !seen.has(check)) {
+      seen.add(check);
+      check = aliases[check]!;
+    }
+    if (check === alias) return void message.reply(`❌ Alias loop detected.`);
+    c.aliases = aliases;
+    writeJson("config.json", c);
+    await message.reply(`✅ Alias set: \`${prefix}${alias}\` → \`${prefix}${target}\``);
+    return;
+  }
+
+  if (cmd === "removealias") {
+    const alias = args[0]?.toLowerCase();
+    if (!alias) return void message.reply(`Usage: \`${prefix}removealias <alias>\``);
+    const c = getConfig();
+    if (!c.aliases[alias]) return void message.reply(`❌ Alias \`${alias}\` does not exist.`);
+    delete c.aliases[alias];
+    writeJson("config.json", c);
+    await message.reply(`✅ Alias removed: \`${prefix}${alias}\``);
+    return;
+  }
+
+  if (cmd === "aliases") {
+    const entries = Object.entries(getConfig().aliases);
+    if (entries.length === 0) return void message.reply("📋 No aliases configured.");
+    await message.reply(`📋 **Aliases**\n${entries.map(([alias, target]) => `\`${prefix}${alias}\` → \`${prefix}${target}\``).join("\n")}`);
+    return;
   }
 
   if (cmd === "createstock") {
