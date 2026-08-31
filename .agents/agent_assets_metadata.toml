@@ -1,0 +1,9 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "hfbk4PvheYrH31YTw2YhU"
+uri = "file://exports/gen-bot-minimal.zip"
+type = "unspecified"
+title = "Gen Bot Minimal ZIP"
+description = "Compact deploy-ready Discord bot package with only 4 required files: bot.js, package.json, Dockerfile, and README.md."
