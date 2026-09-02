@@ -13,5 +13,21 @@
   "minAccountAgeDays": 0,
   "vouchTimeoutMinutes": 3,
   "genRoleId": "1523735238142988419",
-  "genChannelId": "1523735358251208775"
+  "genChannelId": "1523735358251208775",
+  "allowedGuildIds": [],
+  "emojis": {
+    "success": "✅",
+    "error": "❌",
+    "stock": "📦",
+    "free": "👤",
+    "premium": "⭐",
+    "boost": "🚀",
+    "vouch": "💬",
+    "blacklist": "🚫"
+  },
+  "aliases": {
+    "sa": "setalias",
+    "fgen": "free",
+    "bgen": "boost"
+  }
 }
