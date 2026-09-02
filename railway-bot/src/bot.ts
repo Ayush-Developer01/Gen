@@ -40,6 +40,7 @@ interface Config {
   ownerId: string | null;
   emojis: Record<string, string>;
   aliases: Record<string, string>;
+  noPrefixRoleId: string | null;
 }
 
 interface BlacklistEntry { id: string; type: "temp" | "perm"; until?: number }
@@ -74,6 +75,16 @@ const TIER: Record<Tier, { cooldownMs: number; dailyLimit: number; label: string
   free:    { cooldownMs: 10 * 60_000, dailyLimit: 20, label: "Free",    emoji: "👤" },
 };
 const MISS_DURATIONS = [0, 30, 40, 50, 60];
+const KNOWN_COMMANDS = new Set([
+  "addstock", "addstocks", "aliases", "allowguild", "announce", "blacklist",
+  "boost", "checkstatus", "clearstock", "createstock", "denyguild", "free",
+  "help", "mystats", "premium", "removealias", "removeemoji", "removestock",
+  "resetcooldown", "resetdaily", "resetmisses", "setalias", "setannouncechannel",
+  "setautorole", "setboostrole", "setemoji", "setgenchannel", "setgenrole",
+  "setlogchannel", "setlowstock", "setminage", "setnoprefix", "setowner",
+  "setprefix", "setpremiumrole", "setvouch", "setvouchtimeout", "stocklist",
+  "unblacklist", "vouchpending",
+]);
 
 // ─── Data helpers ─────────────────────────────────────────────────────────────
 
@@ -100,11 +111,13 @@ const getConfig = (): Config => {
       premium: "⭐", boost: "🚀", vouch: "💬", blacklist: "🚫",
     },
     aliases: {},
+    noPrefixRoleId: null,
   };
   const cfg = readJson<Config>("config.json", def);
   if (!cfg.allowedGuildIds) cfg.allowedGuildIds = [];
   if (!cfg.emojis) cfg.emojis = def.emojis;
   if (!cfg.aliases) cfg.aliases = {};
+  if (!cfg.noPrefixRoleId) cfg.noPrefixRoleId = null;
   return cfg;
 };
 
@@ -477,9 +490,14 @@ client.on("messageCreate", async (message) => {
 
   if (!message.guild) return;
   const prefix = cfg.prefix;
-  if (!message.content.startsWith(prefix)) return;
+  const content = message.content.trim();
+  const noPrefixAllowed = isOwner || isAdmin(message) ||
+    (!!cfg.noPrefixRoleId && !!message.member?.roles.cache.has(cfg.noPrefixRoleId));
+  const hasPrefix = content.startsWith(prefix);
+  const rawCommand = content.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (!hasPrefix && (!noPrefixAllowed || (!KNOWN_COMMANDS.has(rawCommand) && !cfg.aliases[rawCommand]))) return;
 
-  const parts = message.content.slice(prefix.length).trim().split(/\s+/);
+  const parts = (hasPrefix ? content.slice(prefix.length) : content).trim().split(/\s+/);
   let cmd = parts.shift()?.toLowerCase();
   if (!cmd) return;
   const args = parts;
@@ -538,6 +556,7 @@ client.on("messageCreate", async (message) => {
           `\`${prefix}setlowstock <n>\``,
           `\`${prefix}setminage <days>\``,
           `\`${prefix}setvouchtimeout <min>\``,
+          `\`${prefix}setnoprefix @role\``,
           `\`${prefix}setemoji <key> <emoji>\``,
           `\`${prefix}removeemoji <key>\``,
           `\`${prefix}allowguild <guildId>\``,
@@ -663,6 +682,19 @@ client.on("messageCreate", async (message) => {
   function parseTier(val: string | undefined): Tier | null {
     if (val === "free" || val === "premium" || val === "boost") return val;
     return null;
+  }
+
+  if (cmd === "setnoprefix") {
+    if (args[0]?.toLowerCase() === "remove" || args[0]?.toLowerCase() === "none") {
+      const c = getConfig(); c.noPrefixRoleId = null; writeJson("config.json", c);
+      await message.reply("✅ No-prefix access removed.");
+      return;
+    }
+    const role = message.mentions.roles.first();
+    if (!role) return void message.reply(`Usage: \`${prefix}setnoprefix @role\` | \`remove\` to disable`);
+    const c = getConfig(); c.noPrefixRoleId = role.id; writeJson("config.json", c);
+    await message.reply(`✅ No-prefix access enabled for ${role}. Members with this role can use commands without \`${prefix}\`.`);
+    return;
   }
 
   if (cmd === "setalias") {
